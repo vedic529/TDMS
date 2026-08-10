@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# TDMS - Timetable Database Management System
+# ---------------------------------------------------------------------------
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+next-env.d.ts
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+secrets/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Local prototype databases (never production data)
+*.sqlite
+*.sqlite3
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Machine-specific local tooling config
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Explicitly tracked (do not ignore)
+# ---------------------------------------------------------------------------
+!.env.example
+!apps/web/.env.example
+!apps/api/.env.example
+!apps/web/package-lock.json
+!apps/api/requirements.txt
+!**/Dockerfile
+!docker-compose.yml

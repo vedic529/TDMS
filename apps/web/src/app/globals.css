@@ -1,0 +1,160 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* ---------------------------------------------------------------------------
+   TDMS design system
+   ---------------------------------------------------------------------------
+   One light, professional internal-business theme shared by every operational
+   page: white surfaces on a very light neutral page background, blue as the
+   single accent colour, subtle borders and shadows, rounded cards.
+   --------------------------------------------------------------------------- */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-page: var(--page);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-soft: var(--destructive-soft);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-soft: var(--info-soft);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* System stack: no external font request, so the application builds and runs
+     without network access and renders identically behind Cloudflare. */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+}
+
+:root {
+  --radius: 0.625rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.21 0.02 264);
+
+  /* Very light neutral grey used behind operational page content. */
+  --page: oklch(0.982 0.002 260);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.02 264);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.02 264);
+
+  /* TDMS accent - blue */
+  --primary: oklch(0.546 0.215 263);
+  --primary-foreground: oklch(0.985 0 0);
+  --primary-soft: oklch(0.962 0.019 260);
+
+  --secondary: oklch(0.968 0.004 264);
+  --secondary-foreground: oklch(0.28 0.02 264);
+
+  --muted: oklch(0.972 0.003 264);
+  --muted-foreground: oklch(0.53 0.017 262);
+
+  --accent: oklch(0.966 0.008 262);
+  --accent-foreground: oklch(0.28 0.02 264);
+
+  --destructive: oklch(0.577 0.223 27.3);
+  --destructive-foreground: oklch(0.985 0 0);
+  --destructive-soft: oklch(0.966 0.03 22);
+
+  --success: oklch(0.55 0.13 152);
+  --success-foreground: oklch(0.985 0 0);
+  --success-soft: oklch(0.963 0.03 155);
+
+  --warning: oklch(0.63 0.15 62);
+  --warning-foreground: oklch(0.985 0 0);
+  --warning-soft: oklch(0.968 0.04 78);
+
+  --info: oklch(0.55 0.14 245);
+  --info-foreground: oklch(0.985 0 0);
+  --info-soft: oklch(0.962 0.024 248);
+
+  --border: oklch(0.923 0.005 265);
+  --input: oklch(0.923 0.005 265);
+  --ring: oklch(0.546 0.215 263);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--page);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible, consistent keyboard focus everywhere. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Numeric table cells stay aligned. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .tdms-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .tdms-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .tdms-scrollbar::-webkit-scrollbar-thumb {
+    background-color: oklch(0.88 0.006 265);
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+  }
+
+  /* Calm sky background used only by the sign-in screen. */
+  .tdms-auth-backdrop {
+    background:
+      radial-gradient(90rem 45rem at 50% -20%, oklch(0.95 0.045 235) 0%, transparent 60%),
+      radial-gradient(60rem 30rem at 15% 110%, oklch(0.96 0.03 255) 0%, transparent 55%),
+      linear-gradient(180deg, oklch(0.985 0.008 240) 0%, oklch(0.995 0.003 250) 100%);
+  }
+}

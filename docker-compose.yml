@@ -1,0 +1,51 @@
+# TDMS local development stack.
+#
+#   docker compose up --build
+#
+#   Frontend            http://localhost:3000
+#   Backend             http://localhost:8000
+#   Backend health      http://localhost:8000/health
+#
+# Docker is optional: a developer working only on the frontend can still run
+#   cd apps/web && npm install && npm run dev
+#
+# No production database container is defined here. DATA-07 / OD-13 require the
+# final PostgreSQL schema and hosting configuration to be approved first; a
+# local PostgreSQL service can be added once the schema exists.
+
+services:
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    image: tdms-api:local
+    container_name: tdms-api
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      CORS_ORIGINS: http://localhost:3000
+      # DATABASE_URL is intentionally unset until the schema is approved.
+    ports:
+      - '${API_PORT:-8000}:8000'
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_ENV: ${APP_ENV:-development}
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_TDMS_DATA_MODE: ${NEXT_PUBLIC_TDMS_DATA_MODE:-mock}
+        NEXT_PUBLIC_TDMS_AUTH_MODE: ${NEXT_PUBLIC_TDMS_AUTH_MODE:-mock}
+        NEXT_PUBLIC_TDMS_DEV_TOOLS: 'false'
+    image: tdms-web:local
+    container_name: tdms-web
+    depends_on:
+      - api
+    ports:
+      - '${WEB_PORT:-3000}:3000'

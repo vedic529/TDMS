@@ -1,0 +1,14 @@
+# TDMS API - minimal dependency set for the current skeleton.
+#
+# Only what is needed to start FastAPI and read configuration. Further packages
+# (SQLAlchemy, Alembic, a PostgreSQL driver, Microsoft authentication libraries,
+# openpyxl) are added when the matching feature is implemented, not before.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.4
+httpx==0.28.1
