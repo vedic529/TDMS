@@ -1,0 +1,7 @@
+Next.js serves this directory at the site root, and the production Dockerfile
+copies it into the runtime image. Docker fails the build outright when the path
+does not exist, so this file keeps the directory in the repository while it is
+still empty.
+
+Static assets that must be served as-is — favicon, robots.txt, images referenced
+by absolute URL — belong here.

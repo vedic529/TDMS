@@ -15,31 +15,57 @@ export interface Campus {
   collegeId: string;
   campusName: string;
   campusLocation: string;
+  /**
+   * Other spellings of this campus's address that appear in source systems.
+   *
+   * One site is written several ways — Haymarket as both `841 George St` and
+   * `Level 2, 8 Quay St`. Incoming data must resolve whichever form it uses.
+   */
+  sourceAddresses?: string[];
   /** Student "State" is generated from the selected campus (SRS 6.3). */
   state: string;
   isActive: boolean;
 }
 
-/** SRS 9.3 - Page 4A Course Data fields. */
+/**
+ * SRS 9.3 - Page 4A Course Data fields.
+ *
+ * C-2: the SRS names are Qualification Code (the VET Code) and Qualification
+ * Title (the Course Name).
+ * C-3: "Location represents the Campus value", so there is no separate free-text
+ * location column - it is derived from `campusId`.
+ */
 export interface CourseRecord extends SoftDeletable {
   id: string;
   collegeId: string;
   campusId: string;
   courseCode: string;
-  vetCode: string;
+  qualificationCode: string;
   courseStatus: CourseStatus;
-  courseName: string;
+  qualificationTitle: string;
   courseLevel: string;
   fieldOfEducationBroad: string;
   fieldOfEducationNarrow: string;
   courseSector: string;
   durationInWeeks: number;
   totalCourseCost: number;
-  location: string;
 }
 
-/** COL-05: inactive and superseded values stay visible but are not selectable for new records. */
-export type CourseStatus = 'Active' | 'Inactive' | 'Superseded';
+/**
+ * COL-05 course status, as an open string.
+ *
+ * Not a union. The SRS says a course may be "active, inactive, superseded **or
+ * in another approved status**", so the approved set lives in `course_statuses`
+ * in the database and can grow without a frontend release. A closed union here
+ * forced every unrecognised value into a fallback, which is how a perfectly
+ * active course came to be labelled Inactive.
+ *
+ * The three names below are the ones the interface styles differently; any other
+ * approved value renders neutrally with its own label.
+ */
+export type CourseStatus = string;
+
+export const STYLED_COURSE_STATUSES = ['Active', 'Inactive', 'Superseded'] as const;
 
 /** SRS 9.4 - Page 4B Qualification and Unit Sequence Data fields. */
 export interface QualificationUnitSequence extends SoftDeletable {
@@ -49,7 +75,15 @@ export interface QualificationUnitSequence extends SoftDeletable {
   qualificationTitle: string;
   unitCode: string;
   unitTitle: string;
-  sequenceId: number;
+  /**
+   * C-1: the approved delivery sequence. SRS 8.3 states a separate "Sequence
+   * ID" is not a Page 4B field - a relational table has no inherent row order,
+   * so the ordinal is persisted and used for ordering, but not displayed as a
+   * column. TT-08 depends on it.
+   */
+  deliveryOrder: number;
+  /** C-4: SRS 8.3 Source URL, held on the qualification. */
+  sourceUrl?: string;
   /** Used only to filter Page 4B by college/campus. */
   collegeId: string;
   campusId: string;
@@ -82,6 +116,8 @@ export interface QualificationOffering {
   collegeId: string;
   campusId: string;
   qualificationCode: string;
+  /** Retired codes this qualification replaced, e.g. CHC30121 for CHC30125. */
+  supersededCodes?: string[];
   qualificationTitle: string;
   /** Approved Duration in Weeks options for this offering (SRS 5.3). */
   durationOptions: number[];

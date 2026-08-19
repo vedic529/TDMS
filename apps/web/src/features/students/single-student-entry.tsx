@@ -35,13 +35,16 @@ import { INTERFACE_NAMES } from '@/lib/interface-names';
 import { readOnlyReason } from '@/lib/permissions';
 import { formatDate, nowIso } from '@/lib/format';
 import {
-  COURSE_DURATION_OPTION_RULE_PENDING,
+  NO_GROUP,
   deriveActualCourseDuration,
   deriveCollegeEmail,
-  deriveGroup,
   deriveIntake,
+  deriveIntakeDate,
   deriveState,
-  suggestCourseDurationOption,
+  groupAfterQualificationChange,
+  groupOptionsFor,
+  usesNumberedGroups,
+  validateGroup,
 } from '@/lib/student-rules';
 import { COUNTRY_OPTIONS } from '@/mock-data';
 import { COE_OPTIONS, YES_NO_OPTIONS, studentFormSchema, type StudentFormValues } from './student-fields';
@@ -59,6 +62,8 @@ const EMPTY_FORM: StudentFormValues = {
   proposedStartDate: '',
   proposedEndDate: '',
   qualificationTitle: '',
+  group: '',
+  courseDurationOption: '',
   ctStudent: 'No',
   personalEmail: '',
   primaryPhone: '',
@@ -90,7 +95,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
   });
 
   const values = form.watch();
-  const canChange = permissions.createStudent;
+  const canChange = permissions.maintainStudentData;
 
   // ------------------------------------------------------- derived selections
   const campuses = campusesForCollege(values.collegeId);
@@ -100,21 +105,40 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
   const campus = campusById(values.campusId);
 
   // SRS 6.3 generated values (SST-03).
-  const generated = React.useMemo(() => {
-    const actualCourseDuration = deriveActualCourseDuration(values.proposedStartDate, values.proposedEndDate);
-    return {
+  const generated = React.useMemo(
+    () => ({
+      // Displayed as DD-MMM-YYYY; stored as an ISO date.
       intake: deriveIntake(values.proposedStartDate),
-      group: deriveGroup({
-        qualificationCode: offering?.qualificationCode ?? '',
-        campus,
-        proposedStartDate: values.proposedStartDate,
-      }),
+      intakeDate: deriveIntakeDate(values.proposedStartDate),
       qualificationCode: offering?.qualificationCode ?? '',
       state: deriveState(campus),
-      actualCourseDuration,
-      courseDurationOption: suggestCourseDurationOption(actualCourseDuration, offering?.durationOptions ?? []),
-    };
-  }, [values.proposedStartDate, values.proposedEndDate, offering, campus]);
+      // OD-08 approved: inclusive date calculation.
+      actualCourseDuration: deriveActualCourseDuration(values.proposedStartDate, values.proposedEndDate),
+    }),
+    [values.proposedStartDate, values.proposedEndDate, offering, campus],
+  );
+
+  // ------------------------------------------------------------------ Group
+  const qualificationCode = offering?.qualificationCode ?? '';
+  const groupIsSelectable = usesNumberedGroups(qualificationCode);
+  const groupOptions = groupOptionsFor(qualificationCode);
+  const groupError = qualificationCode ? validateGroup(qualificationCode, values.group) : null;
+
+  /**
+   * Keep Group consistent with the chosen qualification.
+   *
+   * Without this, switching SIT40721 (Group 5) to BSB50420 would leave "Group 5"
+   * on a qualification that has no groups, and switching back would leave "N/A"
+   * in a field that now needs a real choice. Neither stale value should ever
+   * reach the preview, let alone the save.
+   */
+  React.useEffect(() => {
+    if (!qualificationCode) return;
+    const next = groupAfterQualificationChange(qualificationCode, values.group);
+    if (next !== values.group) {
+      form.setValue('group', next, { shouldDirty: true, shouldValidate: false });
+    }
+  }, [qualificationCode, values.group, form]);
 
   // College Email is generated but editable; it regenerates while untouched.
   React.useEffect(() => {
@@ -172,6 +196,9 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
           proposedStartDate: found.proposedStartDate,
           proposedEndDate: found.proposedEndDate,
           qualificationTitle: found.qualificationTitle,
+          // The saved Group, so editing a record does not silently clear it.
+          group: found.group,
+          courseDurationOption: found.courseDurationOption ? String(found.courseDurationOption) : '',
           ctStudent: found.ctStudent,
           personalEmail: found.personalEmail,
           primaryPhone: found.primaryPhone,
@@ -198,8 +225,8 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
 
   function buildInput(): StudentInput {
     return {
-      group: generated.group,
-      intake: generated.intake,
+      group: values.group || NO_GROUP,
+      intake: generated.intakeDate,
       collegeId: values.collegeId,
       campusId: values.campusId,
       collegeEmail: values.collegeEmail,
@@ -210,7 +237,8 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
       proposedStartDate: values.proposedStartDate,
       proposedEndDate: values.proposedEndDate,
       actualCourseDuration: generated.actualCourseDuration,
-      courseDurationOption: generated.courseDurationOption,
+      // OD-08 approved: staff select the approved option; TDMS derives nothing.
+      courseDurationOption: values.courseDurationOption ? Number(values.courseDurationOption) : null,
       qualificationTitle: values.qualificationTitle,
       qualificationCode: generated.qualificationCode,
       ctStudent: values.ctStudent,
@@ -248,23 +276,29 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
       });
     }
 
-    issues.push({
-      id: 'week-calculation',
-      severity: 'pending-approval',
-      title: 'Actual Course Duration calculation',
-      message:
-        'Whether course weeks are counted using inclusive or exclusive dates has not been approved. The calculated value is shown for review and is not final.',
-      openDecisionId: 'OD-08',
-    });
-
-    if (COURSE_DURATION_OPTION_RULE_PENDING) {
+    // Approved 11 August 2026: Group must match the qualification. Blocking,
+    // because the API refuses the save otherwise and a "preview looked fine"
+    // followed by a server rejection is a worse experience than saying so here.
+    if (groupError) {
       issues.push({
-        id: 'ct-rule',
-        severity: 'pending-approval',
-        title: 'CT definition and Course Duration Option display rule',
-        message:
-          'The exact CT definition and the rule that hides Course Duration Option have not been approved, so the field is always shown and no CT business rule is applied.',
-        openDecisionId: 'OD-08',
+        id: 'student-group',
+        severity: 'blocking',
+        title: groupIsSelectable ? 'Select a Group' : 'Group must be N/A',
+        message: groupError,
+        reference: 'Group',
+      });
+    }
+
+    // OD-08 approved: the Course Duration Option must be one of the approved
+    // options for the selected offering when a value is chosen.
+    const approvedOptions = offering?.durationOptions ?? [];
+    if (values.courseDurationOption && !approvedOptions.includes(Number(values.courseDurationOption))) {
+      issues.push({
+        id: 'duration-option',
+        severity: 'blocking',
+        title: 'Course Duration Option is not approved for this qualification',
+        message: `Approved options for ${offering?.qualificationCode ?? 'this qualification'} are ${approvedOptions.join(', ')} weeks. Select an approved option.`,
+        reference: 'Course Duration Option',
       });
     }
 
@@ -421,7 +455,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                   : 'Complete the form, then preview the record before confirming the save.'}
               </CardDescription>
             </div>
-            {mode === 'edit' && record && permissions.deleteStudent && (
+            {mode === 'edit' && record && permissions.maintainStudentData && (
               <Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)}>
                 <Trash2 aria-hidden="true" />
                 Delete
@@ -437,10 +471,27 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                     label="Group"
                     htmlFor="student-group"
                     required
-                    generated
-                    hint="Generated from the qualification, campus and proposed start date."
+                    error={form.formState.errors.group?.message ?? groupError ?? undefined}
+                    hint={
+                      groupIsSelectable
+                        ? `This qualification uses numbered groups. Choose ${groupOptions[0]} to ${groupOptions[groupOptions.length - 1]}.`
+                        : 'This qualification does not use numbered groups.'
+                    }
                   >
-                    <Input id="student-group" value={generated.group} readOnly placeholder="Generated after selection" />
+                    {groupIsSelectable ? (
+                      <SimpleSelect
+                        id="student-group"
+                        value={values.group}
+                        onChange={(next) => form.setValue('group', next, { shouldDirty: true })}
+                        placeholder="Select a group"
+                        options={groupOptions.map((option) => ({ value: option, label: option }))}
+                      />
+                    ) : (
+                      /* Not a disabled dropdown: there is nothing to choose, and
+                         a dropdown with one option invites the user to look for
+                         others that do not exist. */
+                      <Input id="student-group" value={NO_GROUP} readOnly />
+                    )}
                   </FormField>
 
                   <FormField
@@ -572,7 +623,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                     htmlFor="student-duration"
                     required
                     generated
-                    pendingRule="OD-08: whether course weeks are counted using inclusive or exclusive dates has not been approved."
+                    hint="Calculated inclusively from the proposed start and end dates."
                   >
                     <Input
                       id="student-duration"
@@ -586,18 +637,19 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                     label="Course Duration Option"
                     htmlFor="student-duration-option"
                     conditional
-                    pendingRule="OD-08: the rule that hides this field when CT applies has not been approved, so it is always shown."
+                    hint="Select the approved duration option for this student. TDMS does not derive it from a Credit Transfer."
+                    error={errors.courseDurationOption?.message}
                   >
                     <SimpleSelect
                       id="student-duration-option"
-                      value={generated.courseDurationOption ? String(generated.courseDurationOption) : ''}
-                      onChange={() => undefined}
+                      value={values.courseDurationOption}
+                      onChange={(value) => form.setValue('courseDurationOption', value, { shouldValidate: true })}
                       options={(offering?.durationOptions ?? []).map((weeks) => ({
                         value: String(weeks),
                         label: `${weeks} weeks`,
                       }))}
-                      placeholder="Selected from the calculated duration"
-                      disabled
+                      placeholder="Select approved duration option"
+                      disabled={!offering}
                     />
                   </FormField>
 
@@ -638,7 +690,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                     label="CT Student"
                     htmlFor="student-ct"
                     required
-                    pendingRule="OD-08: the exact CT definition has not been confirmed. The value is stored but no CT rule is applied."
+                    hint="CT means Credit Transfer. Yes records that the student has at least one approved Credit Transfer."
                   >
                     <SimpleSelect
                       id="student-ct"
@@ -719,14 +771,14 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
           <SheetBody className="space-y-6">
             <PendingRuleNotice
               decisionId="OD-08"
-              message="Generated values use provisional prototype rules. The approved intake, group and week-calculation rules have not been supplied yet."
+              message="Intake and Group use provisional prototype rules because the approved generation rules have not been supplied yet. Actual Course Duration uses the approved inclusive calculation."
             />
             <PreviewPanel
               groups={[
                 {
                   title: 'Identification and college',
                   items: [
-                    { label: 'Group', value: generated.group, generated: true },
+                    { label: 'Group', value: values.group || NO_GROUP },
                     { label: 'Intake', value: generated.intake, generated: true },
                     { label: 'College', value: college?.collegeFullName ?? '' },
                     { label: 'Campus', value: campus ? `${campus.campusName} — ${campus.campusLocation}` : '' },
@@ -749,7 +801,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                     },
                     {
                       label: 'Course Duration Option',
-                      value: generated.courseDurationOption ? `${generated.courseDurationOption} weeks` : '',
+                      value: values.courseDurationOption ? `${values.courseDurationOption} weeks` : '',
                     },
                     { label: 'Qualification Title', value: values.qualificationTitle },
                     { label: 'Qualification Code', value: generated.qualificationCode, generated: true },
@@ -827,7 +879,7 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
             </div>
             <div className="flex gap-2">
               <dt className="w-32 text-muted-foreground">Group:</dt>
-              <dd className="font-medium">{generated.group || '—'}</dd>
+              <dd className="font-medium">{values.group || '—'}</dd>
             </div>
           </dl>
         </ConfirmationDialog>

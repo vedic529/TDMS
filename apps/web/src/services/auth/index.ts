@@ -7,9 +7,13 @@ let provider: AuthProvider | null = null;
 
 /**
  * Returns the configured authentication adapter.
- * `env.authMode` already falls back to `mock` when the Microsoft Entra tenant
- * is not configured, so the prototype stays usable and the sign-in screen can
- * say which adapter is active.
+ *
+ * `env.authMode` is used exactly as configured - there is deliberately no
+ * downgrade from `entra` to `mock`. If Microsoft sign-in is selected and the
+ * tenant configuration is missing, the Entra adapter raises a clear error and
+ * the sign-in screen explains it. Quietly admitting people through the
+ * development adapter instead would be an application that looks like it is
+ * working while letting anyone in.
  */
 export function getAuthProvider(): AuthProvider {
   if (!provider) {

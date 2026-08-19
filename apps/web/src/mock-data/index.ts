@@ -28,6 +28,8 @@ export function createSeedDataset(): TdmsDataset {
     students: MOCK_STUDENTS,
     timetableSessions: MOCK_TIMETABLE_SESSIONS,
     users: MOCK_USERS,
+    // No seeded access requests: a request is something a real user makes.
+    accessRequests: [],
     activityRecords: MOCK_ACTIVITY_RECORDS,
     importBatches: [],
   });
@@ -42,7 +44,7 @@ export {
   FIELD_OF_EDUCATION_BROAD_OPTIONS,
   FIELD_OF_EDUCATION_NARROW_OPTIONS,
 } from './courses';
-export { MSCRIS_CLASS_NAME_OPTIONS } from './facilities';
+export { MSCRIS_CLASS_NAME } from './facilities';
 export {
   WORKING_TIME_OPTIONS,
   LOCATION_TYPE_OPTIONS,

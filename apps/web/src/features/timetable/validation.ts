@@ -41,11 +41,17 @@ interface NamedSlot {
   slot: DayTimeSlot;
 }
 
+/**
+ * Slots that take part in clash checking.
+ *
+ * OD-11 approved: MSCRIS additional classes are EXCLUDED from trainer,
+ * student-group and facility clash checking, so MSCRIS slots are deliberately
+ * not returned here. They are still stored and displayed.
+ */
 function namedSlots(input: TimetableInput): NamedSlot[] {
   return [
     ...input.theoryDaysAndTimes.map((slot) => ({ kind: 'Theory' as const, slot })),
     ...input.practicalDaysAndTimes.map((slot) => ({ kind: 'Practical' as const, slot })),
-    ...input.mscrisDaysAndTimes.map((slot) => ({ kind: 'MSCRIS' as const, slot })),
   ];
 }
 
@@ -62,12 +68,6 @@ function sessionSlots(session: TimetableSession): Array<NamedSlot & { trainerId:
       slot,
       trainerId: session.practicalTrainerId,
       facility: session.practicalClassroomName,
-    })),
-    ...session.mscrisDaysAndTimes.map((slot) => ({
-      kind: 'MSCRIS' as const,
-      slot,
-      trainerId: session.mscrisTrainerId,
-      facility: session.mscrisClassName,
     })),
   ];
 }
@@ -138,7 +138,7 @@ export function validateTimetableInput(
       severity: 'blocking',
       title: 'No delivery time has been scheduled',
       message:
-        'Add at least one theory, practical or MSCRIS day and time so the session can be checked for clashes.',
+        'Add at least one theory or practical day and time. An MSCRIS day and time on its own is not enough, because MSCRIS classes are excluded from clash checking.',
       reference: 'Theory Days and Times',
     });
   }
@@ -232,7 +232,9 @@ export function validateTimetableInput(
   }
 
   // -------------------------------------------------------- inactive trainer
-  for (const kind of ['Theory', 'Practical', 'MSCRIS'] as const) {
+  // MSCRIS is excluded: OD-11 allows a free-text MSCRIS Trainer, so it cannot
+  // be matched to a trainer record.
+  for (const kind of ['Theory', 'Practical'] as const) {
     const trainerId = trainerFor(input, kind);
     if (!trainerId) continue;
     const trainer = context.trainers.find((entry) => entry.trainerId === trainerId);
@@ -269,7 +271,7 @@ export function validateTimetableInput(
   if (input.qualificationCode && input.uocCode) {
     const sequence = context.unitSequences
       .filter((entry) => entry.qualificationCode === input.qualificationCode)
-      .sort((a, b) => a.sequenceId - b.sequenceId);
+      .sort((a, b) => a.deliveryOrder - b.deliveryOrder);
     const current = sequence.find((entry) => entry.unitCode === input.uocCode);
 
     if (sequence.length > 0 && !current) {
@@ -287,7 +289,7 @@ export function validateTimetableInput(
         others.filter((session) => session.group === input.group).map((session) => session.uocCode),
       );
       const missingEarlier = sequence
-        .filter((entry) => entry.sequenceId < current.sequenceId && !scheduledForGroup.has(entry.unitCode))
+        .filter((entry) => entry.deliveryOrder < current.deliveryOrder && !scheduledForGroup.has(entry.unitCode))
         .map((entry) => entry.unitCode);
 
       if (missingEarlier.length > 0) {
@@ -295,7 +297,7 @@ export function validateTimetableInput(
           id: 'unit-sequence-order',
           severity: 'advisory',
           title: 'Earlier units are not scheduled',
-          message: `${input.uocCode} has sequence ${current.sequenceId}. These earlier units are not yet scheduled for ${input.group}: ${missingEarlier.join(', ')}. Confirm this is intended before saving.`,
+          message: `${input.uocCode} has sequence ${current.deliveryOrder}. These earlier units are not yet scheduled for ${input.group}: ${missingEarlier.join(', ')}. Confirm this is intended before saving.`,
           reference: 'Unit sequence',
         });
       }
@@ -333,7 +335,7 @@ export function validateTimetableInput(
 
   const usesVirtual =
     input.modeOfDelivery === 'Virtual' ||
-    ['Theory', 'Practical', 'MSCRIS'].some((kind) => Boolean(trainerFor(input, kind as SlotKind)));
+    ['Theory', 'Practical'].some((kind) => Boolean(trainerFor(input, kind as SlotKind)));
   if (usesVirtual) {
     issues.push({
       id: 'trainer-delivery-rule',
@@ -345,16 +347,33 @@ export function validateTimetableInput(
     });
   }
 
-  if (input.mscrisClassName || input.mscrisDaysAndTimes.length > 0 || input.mscrisTrainerId) {
+  const hasMscris =
+    Boolean(input.mscrisClassName) || input.mscrisDaysAndTimes.length > 0 || Boolean(input.mscrisTrainerId);
+
+  if (hasMscris) {
+    // Approved consequence of OD-11 worth restating on every preview: a free-text
+    // MSCRIS Trainer excluded from clash checking means TDMS cannot detect a
+    // trainer booked for both an MSCRIS class and a normal class.
     issues.push({
-      id: 'mscris-definition',
-      severity: 'pending-approval',
-      title: 'MSCRIS field rules',
+      id: 'mscris-not-clash-checked',
+      severity: 'advisory',
+      title: 'MSCRIS is not clash checked',
       message:
-        'The full MSCRIS term, business purpose and final field rules are not confirmed. The values entered are stored and displayed, but no MSCRIS business rule is applied.',
-      openDecisionId: 'OD-11',
+        'MSCRIS additional classes are excluded from trainer, student-group and facility clash checking, and the MSCRIS Trainer is free text. Check the MSCRIS day, time and trainer manually before saving.',
+      reference: 'MSCRIS',
     });
   }
+
+  // OD-11: whether MSCRIS is mandatory in certain cases is still unapproved, so
+  // TDMS never requires it.
+  issues.push({
+    id: 'mscris-requirement-rule',
+    severity: 'pending-approval',
+    title: 'When an MSCRIS class is required',
+    message:
+      'MSCRIS is required only in certain cases, but the exact condition has not been supplied. TDMS therefore treats the MSCRIS section as optional and never blocks a save because it is empty.',
+    openDecisionId: 'OD-11',
+  });
 
   const blocking = issues.filter((issue) => issue.severity === 'blocking');
 

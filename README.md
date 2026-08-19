@@ -41,20 +41,29 @@ areas** reached from a sticky top navigation bar:
 Administration and User Activity Records are reached from the account menu, not
 from the primary navigation.
 
-### Access model
+### Access model — v1.1 (approved 11 August 2026)
 
-TDMS has exactly three hierarchy levels (ACC-01):
+TDMS has exactly four access levels, in ascending privilege:
 
-| Level | Role |
-| --- | --- |
-| 1 | Super Admin |
-| 2 | Admin |
-| 3 | Data Editor |
+| Level | Role | May do |
+| --- | --- | --- |
+| 1 | **Viewer** | View, search, filter and download every work area. Read-only. |
+| 2 | **Data Editor** | Everything a Viewer can, plus maintaining **Student Data** and **Timetables**. |
+| 3 | **Admin** | All operational work, including Trainer Data and reference data. |
+| 4 | **Super Admin** | Everything, plus the administration dashboard, roles and access requests. |
 
-**Student Data Officer** and **Timetable Officer** are Data Editor *work
-assignments*, not roles (ACC-02). They never appear in a role selection control.
-A Data Editor can view and download every operational page; only create, edit
-and delete are limited to the assigned work area.
+**Viewer is the default.** An authenticated user from an approved Microsoft
+tenant is provisioned as a Viewer at their first sign-in. Anything higher comes
+from an approved access request or a Super Admin role change.
+
+The Data Editor work assignment (Student Data Officer / Timetable Officer) was
+**removed** in Access Model v1.1: a Data Editor maintains both areas, so the
+distinction no longer decided anything. Trainer and reference data stay
+view-and-download for a Data Editor.
+
+Only a **Super Admin** approves access requests or assigns roles — an Admin does
+neither. Full detail:
+[`docs/database/access-model-v1.1.md`](docs/database/access-model-v1.1.md).
 
 ---
 
@@ -109,14 +118,21 @@ tdms/
 │   └── api/                       # FastAPI skeleton
 │       ├── app/
 │       │   ├── main.py
-│       │   ├── api/  core/  models/  schemas/  services/  repositories/
+│       │   ├── db/                # Base, naming convention, enums, session
+│       │   ├── models/            # SQLAlchemy 2 models — Schema v1, 27 tables
+│       │   ├── api/  core/  schemas/  services/  repositories/
+│       ├── alembic/               # migration environment
+│       │   └── versions/          # migration scripts (in Git)
+│       ├── alembic.ini            # no credentials — URL resolved at runtime
 │       ├── tests/
 │       ├── requirements.txt
 │       ├── Dockerfile
 │       └── .env.example
 │
-├── database/                      # migrations, seeds (empty until approval)
+├── database/                      # reserved for seeds; migrations live in apps/api/alembic/versions
 ├── docs/architecture/
+├── docs/database/                 # approved schema design + implementation record
+├── docs/auth/                     # Microsoft Entra configuration checklist
 ├── .github/workflows/ci.yml
 ├── docker-compose.yml
 ├── .nvmrc
@@ -289,11 +305,12 @@ Because Microsoft Entra ID is not connected, a **development-only** access
 preview is available. It is *not* a production authentication mechanism and does
 not appear in the normal interface.
 
-- Enabled only when `NEXT_PUBLIC_APP_ENV=development` **and**
-  `NEXT_PUBLIC_TDMS_DEV_TOOLS=true`.
+- Enabled only when `NEXT_PUBLIC_APP_ENV=development`, `NEXT_PUBLIC_TDMS_AUTH_MODE=mock`
+  **and** `NEXT_PUBLIC_TDMS_DEV_TOOLS=true`. It disappears the moment real
+  Microsoft sign-in is switched on.
 - Opened from a discreet **Dev tools** button in the bottom-right corner.
-- Lets you preview: Super Admin · Admin · Data Editor / Student Data Officer ·
-  Data Editor / Timetable Officer, plus the Inactive and Disabled account states.
+- Lets you preview all four access levels — Viewer · Data Editor · Admin ·
+  Super Admin — plus the Inactive and Disabled account states.
 - Also offers **Reset demo data**, which restores the seeded dataset.
 
 Users can never choose their own role in the application itself. The role badge
@@ -362,6 +379,141 @@ docker compose up --build
 
 ---
 
+## 16a. Local PostgreSQL development database
+
+Database Schema v1 was approved on 10 August 2026 and is now implemented as SQLAlchemy 2 models plus
+an Alembic migration. A local PostgreSQL 17 instance runs in Docker for development. Every structural
+change reaches the database through a migration in Git — never through `psql`, a GUI, or
+`create_all()`.
+
+First-time setup — copy the example environment file and set a local password:
+
+```bash
+cp .env.example .env
+```
+
+Start the database only:
+
+```bash
+docker compose up -d db
+```
+
+Check it is healthy:
+
+```bash
+docker compose ps
+```
+
+Open a psql session:
+
+```bash
+docker compose exec db psql -U postgres -d tdms_dev
+```
+
+Stop it, keeping the data:
+
+```bash
+docker compose down
+```
+
+| | |
+| --- | --- |
+| Image | `postgres:17-bookworm` (pinned major version) |
+| Database | `tdms_dev` |
+| Address | `127.0.0.1:5432` — loopback only |
+| Volume | `tdms_postgres_data` (survives `docker compose down`) |
+
+> `docker compose down -v` **destroys the database volume.** Full command reference, reset procedure
+> and troubleshooting: [`docs/database/local-postgresql-development.md`](docs/database/local-postgresql-development.md).
+
+Development only — no Supabase, no production connection, no real student data. Docker Desktop use
+must comply with the organisation's applicable Docker subscription and licensing requirements.
+
+---
+
+## 16b. Applying database migrations
+
+The database must be running (§16a) and the Python virtual environment **must be activated** — the
+`alembic` command lives inside it.
+
+```powershell
+cd C:\TDMS\apps\api
+.\.venv\Scripts\Activate.ps1
+```
+
+Apply every outstanding migration:
+
+```bash
+alembic upgrade head
+```
+
+Check which revision the database is on:
+
+```bash
+alembic current
+```
+
+Confirm the database matches the models — this must report *No new upgrade operations detected*:
+
+```bash
+alembic check
+```
+
+Run the backend tests, which verify the live schema against the approved design:
+
+```bash
+pytest -q
+```
+
+Undo the most recent migration:
+
+```bash
+alembic downgrade -1
+```
+
+After a successful `alembic upgrade head` the development database holds **28 tables, 1 view and 15
+enum types**, at revision `0e8b41dd1b13` (Schema v1, plus the Access Model v1.1 and Student Rules
+v1.1 amendments).
+
+FastAPI connects as the least-privilege role **`tdms_app`**, which cannot alter the schema and cannot
+UPDATE or DELETE user activity records (LOG-05 by privilege, not by convention). Migrations keep
+using the administrator credentials. To create the role on a new machine, see
+[`database/roles/create-application-role.sql`](database/roles/create-application-role.sql).
+
+No user accounts exist yet — sign-in still runs entirely on the frontend mock provider.
+
+> The connection string is resolved at runtime from `.env`; `alembic.ini` contains no credentials and
+> none may ever be added to it. Creating or reviewing migrations:
+> [`docs/database/migration-workflow.md`](docs/database/migration-workflow.md). What was built and how
+> it was verified: [`docs/database/schema-v1-implementation.md`](docs/database/schema-v1-implementation.md).
+
+---
+
+## 16c. Initial development access seed
+
+Pre-provisions the approved initial TDMS accounts — **5 Super Admin, 1 Admin, 0 Data Editor**. It
+inserts only; it never updates an existing account. Requires the activated virtual environment
+(§16b).
+
+Report what would happen, changing nothing:
+
+```bash
+python -m app.db.seeds.initial_access --dry-run
+```
+
+Insert the missing approved accounts, in one transaction:
+
+```bash
+python -m app.db.seeds.initial_access --apply
+```
+
+Safe to run more than once. A domain suffix grants nothing — every Data Editor needs an individually
+approved account and one approved work assignment, and none have been approved yet.
+
+> **Not yet applied.** `users.display_name` is NOT NULL in Schema v1 and the six people's names have
+> not been supplied. The seed refuses rather than deriving a name from an email address. Details and
+> how to unblock: [`docs/database/initial-access-seeding.md`](docs/database/initial-access-seeding.md).
+
 ## 17. Docker setup
 
 - `apps/web/Dockerfile` — multi-stage build (dependencies → build → runtime)
@@ -384,10 +536,15 @@ npm run lint
 npm run typecheck
 npm test
 
-# Backend
+# Backend — activate the virtual environment first
 cd apps/api
 pytest -q
 ```
+
+The backend suite includes 116 schema tests that check the **live** development database against the
+approved Schema v1. They need the `db` container running and migrations applied (§16a, §16b);
+without a database those tests fail rather than silently pass. They write nothing permanent — every
+integrity test runs inside a transaction that is rolled back.
 
 ---
 
@@ -405,20 +562,53 @@ change that only works under `npm run dev` is not done.
 
 ---
 
-## 20. Future Microsoft Entra integration
+## 20. Microsoft Entra sign-in
 
-1. Approve OD-01: tenant, app registration, redirect addresses, permitted users,
-   role mapping and production support owner.
-2. Add `@azure/msal-browser` and complete
-   `apps/web/src/services/auth/entra-auth-provider.ts`. The flow is documented in
-   that file and follows SRS 4.1.
-3. Set `NEXT_PUBLIC_ENTRA_CLIENT_ID`, `NEXT_PUBLIC_ENTRA_TENANT_ID`,
-   `NEXT_PUBLIC_ENTRA_REDIRECT_URI` and `NEXT_PUBLIC_TDMS_AUTH_MODE=entra`.
-4. Match the verified account to one internal TDMS user record and apply the
-   access level and work assignment (AUTH-04).
-5. Retain the correlation ID for authorised investigation (AUTH-11).
+**Implemented. Live activation is blocked on IT configuration** — the
+Application (Client) ID has not been supplied yet, so `TDMS_AUTH_MODE` stays
+`mock` and sign-in uses the development adapter.
 
-No page component changes: everything goes through `getAuthProvider()`.
+How it works once configured:
+
+```
+Microsoft Entra
+      |  verified access token
+      v
+FastAPI validates: signature (tenant JWKS) -> audience -> issuer
+                   -> expiry -> tenant allow-list -> usable oid
+      |
+      v
+tid + oid  ->  TDMS user record  ->  access level  ->  granted or denied
+```
+
+- **The tenant is the security boundary, not the email domain.** Anybody can
+  create a lookalike mailbox in a tenant they control; the `tid` claim is signed
+  by Microsoft and cannot be chosen by the user. Personal Microsoft accounts are
+  refused outright.
+- **`tid + oid` is the durable identity.** A mailbox rename updates the profile
+  and nothing else — it cannot promote anyone or create a second account.
+- **First sign-in provisions a Viewer.** Six approved addresses bind at an
+  elevated role instead, and that list is consulted exactly once.
+- **No password, token or secret is ever stored by TDMS.**
+
+### Development mode
+
+`TDMS_AUTH_MODE=mock` uses the development adapter, which never contacts
+Microsoft. It is refused when `APP_ENV=production`, and setting
+`TDMS_AUTH_MODE=entra` without the configuration **disables sign-in with a clear
+message** rather than falling back — a production deployment missing its
+configuration must fail loudly, not quietly admit everyone.
+
+What IT still needs to supply, and what each value does:
+[`docs/auth/microsoft-entra-setup.md`](docs/auth/microsoft-entra-setup.md).
+
+### Remaining work
+
+Add `@azure/msal-browser` and complete
+`apps/web/src/services/auth/entra-auth-provider.ts`. That file documents exactly
+where `loginRedirect`, `acquireTokenSilent` and `logoutRedirect` connect; the
+token handoff to `GET /me` is already written. No page component changes:
+everything goes through `getAuthProvider()`.
 
 ## 21. Future FastAPI, Supabase and PostgreSQL integration
 
@@ -459,22 +649,47 @@ redesign.
 Section 12 of the SRS lists thirteen unresolved decisions. **TDMS does not invent
 a rule for any of them.** Where an unresolved rule would apply, the interface
 shows an "Awaiting approval" notice naming the decision, and the matching
-validation check is displayed without producing a pass or fail result. The full
-register is available in the application under **Administration → Open
-decisions**, and in `apps/web/src/lib/open-decisions.ts`.
+validation check is displayed without producing a pass or fail result.
 
-Most visible examples:
+A supplied fact may resolve *part* of a decision. Those are shown as
+**Partially resolved · awaiting remaining approval**, never as approved. The
+working register — what has been confirmed and what is still outstanding for
+each decision — is in the application under **Administration → Open decisions**
+and in `apps/web/src/lib/open-decisions.ts`.
+
+### Approved
+
+| Decision | Approved rule, as implemented |
+| --- | --- |
+| OD-08 Student calculations | CT means **Credit Transfer**, and CT Student is a flag only — TDMS stores no transferred units, count or CT reference. Course duration for a CT student is a staff-selected approved Course Duration Option; TDMS derives no reduction. Course Duration Option is always shown and is validated against the approved options for the offering. Actual Course Duration uses **inclusive** dates: `(end − start + 1 day) ÷ 7`. |
+
+### Currently partially resolved
+
+| Decision | Confirmed | Still outstanding |
+| --- | --- | --- |
+| OD-01 Entra configuration and TDMS access | Super Admin and Admin rosters; the two Data Editor domains. **Access model:** the domains mark eligibility only — every account must still be approved in TDMS. **Work assignment:** manually selected by an Admin or Super Admin, never inferred. | Tenant, app registration, redirect addresses and production support owner |
+| OD-03 Session timeout | 30-minute inactivity timeout — **implemented and enforced** | Whether a maximum session duration also applies |
+| OD-11 MSCRIS | Additional classes, particularly for specific topics. Spelling stays **MSCRIS**. Virtual only. Class Name is fixed to "Virtual Classroom". Trainer is free text. Excluded from all clash checking. | The exact condition that makes an MSCRIS class mandatory — until supplied, the section is optional and never blocks a save |
+
+> **MSCRIS trade-off, recorded deliberately.** A free-text MSCRIS Trainer combined with exclusion from clash checking means TDMS **cannot** detect a trainer booked for both an MSCRIS class and a normal class, and it does not satisfy DATA-02 for that field. Implemented as approved; the preview panel warns the user to check MSCRIS manually.
+
+**Access is never granted by email domain.** The supplied organisation domains are
+recorded for reference only. TDMS grants access solely when the authenticated
+identity matches an approved internal user record with a role and, for a Data
+Editor, a work assignment (AUTH-04, ACC-05).
+
+### Still fully open
 
 | Decision | Effect in the interface |
 | --- | --- |
-| OD-03 Session timeout | No session timeout is applied; stated in Account information |
 | OD-05 Admin role boundary | Admin authority over other Admin/Super Admin accounts is gated by an explicit delegation flag |
 | OD-06 Delete and override reasons | The reason list is labelled as the SRS *proposed* list |
 | OD-07 Break rules | The break check appears in every timetable validation panel as "Awaiting approval" |
-| OD-08 Student calculations | Actual Course Duration, the Course Duration Option display rule and the CT definition are marked provisional |
 | OD-09 Facility data | Facilities support selection, capacity and clash checks only; no fifth navigation page is created |
 | OD-10 Trainer delivery rule | Physical-to-virtual availability is not derived |
-| OD-11 MSCRIS | Fields are captured and displayed; no MSCRIS business rule is applied |
+
+OD-02, OD-04, OD-12 and OD-13 are backend, retention and hosting decisions and
+do not change the current interface.
 
 ---
 
@@ -484,3 +699,20 @@ Most visible examples:
 - [`docs/architecture/srs-traceability.md`](docs/architecture/srs-traceability.md)
 - [`apps/api/README.md`](apps/api/README.md)
 - [`database/README.md`](database/README.md)
+
+Database — approved Schema v1 and its implementation:
+
+- [`docs/database/schema-v1-proposal.md`](docs/database/schema-v1-proposal.md) — the approved design
+- [`docs/database/schema-v1-data-dictionary.md`](docs/database/schema-v1-data-dictionary.md) — authority for every column
+- [`docs/database/schema-v1-relationships.md`](docs/database/schema-v1-relationships.md)
+- [`docs/database/schema-v1-erd.md`](docs/database/schema-v1-erd.md)
+- [`docs/database/schema-open-questions.md`](docs/database/schema-open-questions.md) — DBQ-01…15, all answered
+- [`docs/database/database-requirements-review.md`](docs/database/database-requirements-review.md) — requirements-to-data matrix
+- [`docs/database/local-postgresql-development.md`](docs/database/local-postgresql-development.md) — the Docker database
+- [`docs/database/schema-v1-implementation.md`](docs/database/schema-v1-implementation.md) — what was built and how it was verified
+- [`docs/database/migration-workflow.md`](docs/database/migration-workflow.md) — how to change the schema
+- [`docs/database/access-model-v1.1.md`](docs/database/access-model-v1.1.md) — the approved access amendment
+- [`docs/database/student-rules-v1.1.md`](docs/database/student-rules-v1.1.md) — approved Intake and Group rules
+- [`docs/auth/tdms-authentication-status.md`](docs/auth/tdms-authentication-status.md) — Microsoft configuration status
+- [`docs/database/initial-access-seeding.md`](docs/database/initial-access-seeding.md) — the elevated bootstrap list
+- [`docs/auth/microsoft-entra-setup.md`](docs/auth/microsoft-entra-setup.md) — what IT must supply for live SSO

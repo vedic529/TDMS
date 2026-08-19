@@ -1,5 +1,13 @@
 import type { ReasonCode } from '@/types/common';
-import type { TdmsUser } from '@/types/auth';
+import type {
+  AccessRequest,
+  AccountStatus,
+  DashboardOverview,
+  NotificationOutcome,
+  RequestableRole,
+  TdmsRole,
+  TdmsUser,
+} from '@/types/auth';
 import type { UserActivityRecord, ActivityFilters } from '@/types/activity';
 import type { StudentRecord, StudentInput, StudentFilters } from '@/types/student';
 import type { TimetableSession, TimetableInput, TimetableFilters } from '@/types/timetable';
@@ -127,6 +135,35 @@ export interface TdmsClient {
   listUsers(): Promise<TdmsUser[]>;
   createUser(input: UserInput, context: ActionContext): Promise<TdmsUser>;
   updateUser(id: string, input: UserInput, context: ActionContext): Promise<TdmsUser>;
+
+  // -- Access requests (Access Model v1.1) ---------------------------------
+  /** The caller's own pending request, or null. */
+  getMyAccessRequest(userId: string): Promise<AccessRequest | null>;
+  submitAccessRequest(
+    requestedRole: RequestableRole,
+    context: ActionContext,
+  ): Promise<{ request: AccessRequest; notification: NotificationOutcome }>;
+  cancelAccessRequest(id: string, context: ActionContext): Promise<AccessRequest>;
+
+  /** Super Admin only. Every request, newest first. */
+  listAccessRequests(): Promise<AccessRequest[]>;
+  /**
+   * Approving applies the new access level and closes the request together.
+   * The first decision wins: a second attempt must be refused, not silently
+   * overwrite the first.
+   */
+  approveAccessRequest(id: string, context: ActionContext): Promise<AccessRequest>;
+  denyAccessRequest(id: string, context: ActionContext): Promise<AccessRequest>;
+
+  /** Super Admin only. Direct role change, independent of the request system. */
+  changeUserRole(id: string, role: TdmsRole, context: ActionContext): Promise<TdmsUser>;
+  changeUserAccountStatus(
+    id: string,
+    status: AccountStatus,
+    context: ActionContext,
+  ): Promise<TdmsUser>;
+
+  getDashboardOverview(): Promise<DashboardOverview>;
 
   listActivityRecords(filters: ActivityFilters): Promise<UserActivityRecord[]>;
   /** LOG-01: used for actions the pages perform directly, such as export. */

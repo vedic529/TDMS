@@ -179,7 +179,7 @@ export function TimetableWorkArea() {
     }
   }
 
-  const canChange = permissions.createTimetable;
+  const canChange = permissions.maintainTimetable;
 
   return (
     <div className="space-y-5">
@@ -452,7 +452,7 @@ export function TimetableWorkArea() {
         rows={deletedRows}
         loading={recycleLoading}
         rowKey={(row) => row.id}
-        canRestore={permissions.deleteTimetable}
+        canRestore={permissions.maintainTimetable}
         columns={[
           { id: 'record', header: 'Record', cell: (row) => row.recordNumber, sortValue: (row) => row.recordNumber },
           { id: 'group', header: 'Group', cell: (row) => row.group },

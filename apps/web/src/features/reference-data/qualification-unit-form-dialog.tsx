@@ -21,9 +21,14 @@ import { PreviewPanel } from '@/components/common/preview-panel';
 import { ValidationPanel } from '@/components/common/validation-panel';
 import { ConfirmationDialog } from '@/components/common/confirmation-dialog';
 import { ChangeSummaryDialog, buildChanges } from '@/components/common/change-summary-dialog';
-import { useReferenceData } from '@/features/shared/reference-data-context';
+import {
+  referenceApi,
+  type ApiQualification,
+  type ApiUnit,
+} from '@/services/reference-api';
+import { useReferenceLookups } from './use-reference-lookups';
+import { qualificationCodeLabel } from './reference-adapters';
 import { useAuth } from '@/features/auth/auth-context';
-import { getTdmsClient } from '@/services';
 import { nowIso } from '@/lib/format';
 import type { ValidationIssue, ValidationResult } from '@/types/common';
 import type { QualificationUnitSequence, UocType } from '@/types/reference';
@@ -35,7 +40,7 @@ const EMPTY: QualificationUnitInput = {
   qualificationTitle: '',
   unitCode: '',
   unitTitle: '',
-  sequenceId: 1,
+  deliveryOrder: 1,
   collegeId: '',
   campusId: '',
   uocType: 'Theory',
@@ -57,10 +62,52 @@ export function QualificationUnitFormDialog({
   existingRecords,
   onSaved,
 }: QualificationUnitFormDialogProps) {
-  const { data, campusesForCollege, offeringsFor } = useReferenceData();
+  const { colleges, campusesForCollege, loadCampusesFor } = useReferenceLookups();
+  const [qualifications, setQualifications] = React.useState<ApiQualification[]>([]);
+  const [units, setUnits] = React.useState<ApiUnit[]>([]);
+
+  // Real qualifications and units for the dependent dropdowns.
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [q, u] = await Promise.all([
+          referenceApi.listQualifications({ activeOnly: true }),
+          referenceApi.listUnits({ activeOnly: true }),
+        ]);
+        if (!cancelled) {
+          setQualifications(q);
+          setUnits(u);
+        }
+      } catch {
+        if (!cancelled) {
+          setQualifications([]);
+          setUnits([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const { user } = useAuth();
 
   const [input, setInput] = React.useState<QualificationUnitInput>(EMPTY);
+
+  /**
+   * The chosen qualification's database id, held beside the display input.
+   *
+   * The form shows a Qualification Code, but that is not an identity any more:
+   * every code-less ELICOS qualification displays as NA. The id is what the
+   * selection and the save actually resolve against.
+   */
+  const [qualificationId, setQualificationId] = React.useState('');
+
+  // COL-01: the approved campuses for the chosen college come from the API.
+  React.useEffect(() => {
+    void loadCampusesFor(input.collegeId);
+  }, [input.collegeId, loadCampusesFor]);
   const [step, setStep] = React.useState<'form' | 'preview'>('form');
   const [validation, setValidation] = React.useState<ValidationResult | null>(null);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
@@ -73,10 +120,20 @@ export function QualificationUnitFormDialog({
     if (editing) {
       const { id: _id, isDeleted: _d, deletion: _del, ...rest } = editing;
       setInput(rest);
+      // Recover the id from the row being edited, matching on the same label
+      // the list renders.
+      setQualificationId(
+        String(
+          qualifications.find(
+            (row) => qualificationCodeLabel(row.qualification_code) === editing.qualificationCode,
+          )?.id ?? '',
+        ),
+      );
     } else {
       setInput(EMPTY);
+      setQualificationId('');
     }
-  }, [open, editing]);
+  }, [open, editing, qualifications]);
 
   function update<K extends keyof QualificationUnitInput>(key: K, value: QualificationUnitInput[K]) {
     setInput((current) => ({ ...current, [key]: value }));
@@ -84,14 +141,23 @@ export function QualificationUnitFormDialog({
     setStep('form');
   }
 
-  const offerings = offeringsFor(input.collegeId, input.campusId);
+  // Real qualifications. A qualification's unit sequence is a property of the
+  // qualification itself, so the list is not narrowed by college or campus.
+  //
+  // Keyed on the id, not the code: ELICOS qualifications have no VET Code and
+  // all display as NA, so a code-keyed option list would make two different
+  // qualifications indistinguishable — and silently select the wrong one.
+  const qualificationOptions = qualifications.map((row) => ({
+    value: String(row.id),
+    label: `${qualificationCodeLabel(row.qualification_code)} — ${row.qualification_title}`,
+  }));
 
   function runPreview() {
     const issues: ValidationIssue[] = [];
     const required: Array<[string, unknown, string]> = [
       ['College', input.collegeId, 'Select the college that offers the qualification.'],
       ['Campus', input.campusId, 'Select an approved campus for the selected college.'],
-      ['Qualification Code', input.qualificationCode, 'Select the approved qualification.'],
+      ['Qualification Code', qualificationId, 'Select the approved qualification.'],
       ['Unit Code', input.unitCode, 'Enter the approved Unit of Competency code.'],
       ['Unit Title', input.unitTitle, 'Enter the approved Unit of Competency title.'],
       ['Record ID', input.recordId, 'Enter the system or source reference for this relationship.'],
@@ -108,7 +174,7 @@ export function QualificationUnitFormDialog({
       }
     }
 
-    if (!input.sequenceId || input.sequenceId < 1) {
+    if (!input.deliveryOrder || input.deliveryOrder < 1) {
       issues.push({
         id: 'qus-sequence',
         severity: 'blocking',
@@ -140,14 +206,14 @@ export function QualificationUnitFormDialog({
         record.id !== editing?.id &&
         record.campusId === input.campusId &&
         record.qualificationCode === input.qualificationCode &&
-        record.sequenceId === input.sequenceId,
+        record.deliveryOrder === input.deliveryOrder,
     );
     if (duplicateSequence) {
       issues.push({
         id: 'qus-duplicate-sequence',
         severity: 'advisory',
         title: 'Sequence ID is already used',
-        message: `Sequence ${input.sequenceId} is already used by ${duplicateSequence.unitCode}. Confirm this is intended before saving.`,
+        message: `Sequence ${input.deliveryOrder} is already used by ${duplicateSequence.unitCode}. Confirm this is intended before saving.`,
         reference: 'Sequence ID',
       });
     }
@@ -164,14 +230,25 @@ export function QualificationUnitFormDialog({
     if (!user || !validation?.canSave) return;
     setBusy(true);
     try {
-      const client = getTdmsClient();
+      const qualification = qualifications.find((row) => String(row.id) === qualificationId);
+      const unit = units.find((row) => row.unit_code === input.unitCode);
+
       if (editing) {
-        await client.updateQualificationUnit(editing.id, input, { actor: user });
-        toast.success('Record updated', { description: `${input.recordId} was updated.` });
+        await referenceApi.updateQualificationUnit(Number(editing.id), {
+          unit_id: unit?.id,
+          delivery_order: input.deliveryOrder,
+        });
+        toast.success('Record updated', { description: `${input.unitCode} was updated.` });
       } else {
-        await client.createQualificationUnit(input, { actor: user });
+        if (!qualification) throw new Error('Select an approved qualification.');
+        if (!unit) throw new Error('Select an approved unit.');
+        await referenceApi.createQualificationUnit({
+          qualification_id: qualification.id,
+          unit_id: unit.id,
+          delivery_order: input.deliveryOrder,
+        });
         toast.success('Record added', {
-          description: `${input.unitCode} was added to ${input.qualificationCode} at sequence ${input.sequenceId}.`,
+          description: `${input.unitCode} was added to ${input.qualificationCode} at delivery order ${input.deliveryOrder}.`,
         });
       }
       setConfirmOpen(false);
@@ -193,7 +270,7 @@ export function QualificationUnitFormDialog({
         { key: 'qualificationTitle', label: 'Qualification Title' },
         { key: 'unitCode', label: 'Unit Code' },
         { key: 'unitTitle', label: 'Unit Title' },
-        { key: 'sequenceId', label: 'Sequence ID' },
+        { key: 'deliveryOrder', label: 'Sequence ID' },
         { key: 'uocType', label: 'UoC Type' },
       ])
     : [];
@@ -207,7 +284,7 @@ export function QualificationUnitFormDialog({
         { label: 'Qualification Title', value: input.qualificationTitle },
         { label: 'Unit Code', value: input.unitCode },
         { label: 'Unit Title', value: input.unitTitle },
-        { label: 'Sequence ID', value: input.sequenceId },
+        { label: 'Sequence ID', value: input.deliveryOrder },
         { label: 'UoC Type', value: input.uocType },
       ],
     },
@@ -241,7 +318,7 @@ export function QualificationUnitFormDialog({
                         setValidation(null);
                         setStep('form');
                       }}
-                      options={(data?.colleges ?? []).map((college) => ({
+                      options={colleges.map((college) => ({
                         value: college.id,
                         label: college.collegeFullName,
                       }))}
@@ -268,28 +345,19 @@ export function QualificationUnitFormDialog({
                   <FormField label="Qualification Code" htmlFor="qus-qualification" required>
                     <DependentSelect
                       id="qus-qualification"
-                      value={input.qualificationCode}
+                      value={qualificationId}
                       onChange={(value) => {
-                        const offering = offerings.find((entry) => entry.qualificationCode === value);
+                        const chosen = qualifications.find((row) => String(row.id) === value);
+                        setQualificationId(value);
                         setInput((current) => ({
                           ...current,
-                          qualificationCode: value,
-                          qualificationTitle: offering?.qualificationTitle ?? '',
+                          qualificationCode: qualificationCodeLabel(chosen?.qualification_code),
+                          qualificationTitle: chosen?.qualification_title ?? '',
                         }));
                         setValidation(null);
                         setStep('form');
                       }}
-                      options={Array.from(
-                        new Map(
-                          offerings.map((entry) => [
-                            entry.qualificationCode,
-                            {
-                              value: entry.qualificationCode,
-                              label: `${entry.qualificationCode} — ${entry.qualificationTitle}`,
-                            },
-                          ]),
-                        ).values(),
-                      )}
+                      options={qualificationOptions}
                       placeholder="Select qualification"
                       requires={input.campusId ? undefined : 'a campus'}
                     />
@@ -315,8 +383,8 @@ export function QualificationUnitFormDialog({
                       id="qus-sequence"
                       type="number"
                       min={1}
-                      value={input.sequenceId || ''}
-                      onChange={(event) => update('sequenceId', Number(event.target.value))}
+                      value={input.deliveryOrder || ''}
+                      onChange={(event) => update('deliveryOrder', Number(event.target.value))}
                     />
                   </FormField>
                   <FormField label="Unit Code" htmlFor="qus-unit-code" required>

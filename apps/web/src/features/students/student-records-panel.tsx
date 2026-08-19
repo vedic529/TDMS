@@ -9,12 +9,14 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
-import { DependentSelect } from '@/components/common/dependent-select';
+import { formatIntake } from '@/lib/student-rules';
 import { FilterField } from '@/components/common/filter-bar';
 import { EmptyState } from '@/components/common/states';
 import { ExportMenu } from '@/components/common/export-menu';
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { useReferenceData } from '@/features/shared/reference-data-context';
+import { useCascadingFilters } from '@/features/reference-data/use-cascading-filters';
+import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useAuth } from '@/features/auth/auth-context';
 import { getTdmsClient } from '@/services';
 import { SRS_PAGE_REFERENCE } from '@/lib/interface-names';
@@ -30,7 +32,8 @@ import type { StudentFilters, StudentRecord } from '@/types/student';
  */
 export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (studentId: string) => void }) {
   const { user, permissions } = useAuth();
-  const { data, campusesForCollege, offeringsFor, collegeById, campusById } = useReferenceData();
+  const { collegeById, campusById } = useReferenceData();
+  const cascade = useCascadingFilters();
 
   const [filters, setFilters] = React.useState<StudentFilters>({});
   const [rows, setRows] = React.useState<StudentRecord[]>([]);
@@ -43,11 +46,39 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setRows(await getTdmsClient().listStudents(filters));
+      // The cascade owns College/Campus/Qualification; `filters` keeps only the
+      // free-text search. Passing both would let a stale id from the old state
+      // silently narrow the list.
+      const all = await getTdmsClient().listStudents({ search: filters.search });
+
+      const colleges = new Set(cascade.filters.collegeIds);
+      const campuses = new Set(cascade.filters.campusIds);
+      const qualifications = new Set(
+        cascade.qualificationOptions
+          .filter((option) => cascade.filters.qualificationIds.includes(option.value))
+          .map((option) => option.label.split(' — ')[0]),
+      );
+
+      // An empty set means "no restriction at that level" — the Select All
+      // contract — not "match nothing".
+      setRows(
+        all.filter(
+          (student) =>
+            (colleges.size === 0 || colleges.has(student.collegeId)) &&
+            (campuses.size === 0 || campuses.has(student.campusId)) &&
+            (qualifications.size === 0 || qualifications.has(student.qualificationCode)),
+        ),
+      );
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [
+    filters.search,
+    cascade.filters.collegeIds,
+    cascade.filters.campusIds,
+    cascade.filters.qualificationIds,
+    cascade.qualificationOptions,
+  ]);
 
   React.useEffect(() => {
     void load();
@@ -62,8 +93,6 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
     }
   }, []);
 
-  const campuses = campusesForCollege(filters.collegeId);
-  const offerings = offeringsFor(filters.collegeId, filters.campusId);
 
   const columns: DataTableColumn<StudentRecord>[] = [
     {
@@ -90,7 +119,16 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
       sortValue: (row) => row.qualificationCode,
     },
     { id: 'group', header: 'Group', cell: (row) => row.group || '—', sortValue: (row) => row.group },
-    { id: 'intake', header: 'Intake', cell: (row) => row.intake || '—', sortValue: (row) => row.intake },
+    // Displayed as DD-MMM-YYYY, sorted on the underlying ISO date so
+    // January 2027 does not sort before August 2026.
+    {
+      id: 'intake',
+      header: 'Intake',
+      // A CT student has no intake. `N/A` says that deliberately; an
+      // em dash would read as missing data.
+      cell: (row) => (row.intake ? formatIntake(row.intake) : 'N/A'),
+      sortValue: (row) => row.intake ?? '',
+    },
     {
       id: 'campus',
       header: 'Campus',
@@ -133,7 +171,7 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
               pageReference={SRS_PAGE_REFERENCE.singleStudentEntry}
               columns={[
                 { header: 'Group', value: (row) => row.group },
-                { header: 'Intake', value: (row) => row.intake },
+                { header: 'Intake', value: (row) => (row.intake ? formatIntake(row.intake) : 'N/A') },
                 { header: 'College', value: (row) => collegeById(row.collegeId)?.collegeFullName ?? '' },
                 { header: 'Campus', value: (row) => campusById(row.campusId)?.campusName ?? '' },
                 { header: 'College Email', value: (row) => row.collegeEmail },
@@ -155,7 +193,7 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
                 { header: 'Remarks', value: (row) => row.remarks },
               ]}
             />
-            {permissions.deleteStudent && (
+            {permissions.maintainStudentData && (
               <Button
                 variant="outline"
                 size="sm"
@@ -181,45 +219,42 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
                 placeholder="Student ID, name or email"
               />
             </FilterField>
+            {/*
+              The same cascade Page 4 uses, from the same service. College
+              narrows Campus; College and Campus together narrow Qualification to
+              what is genuinely offered there — never the global list.
+            */}
             <FilterField label="College" htmlFor="student-list-college">
-              <DependentSelect
+              <MultiSelectFilter
                 id="student-list-college"
-                value={filters.collegeId ?? ''}
-                onChange={(value) =>
-                  setFilters((current) => ({ ...current, collegeId: value, campusId: '', qualificationCode: '' }))
-                }
-                options={(data?.colleges ?? []).map((college) => ({
-                  value: college.id,
-                  label: college.collegeFullName,
-                }))}
-                placeholder="All colleges"
+                value={cascade.filters.collegeIds}
+                onChange={cascade.setColleges}
+                options={cascade.collegeOptions}
+                allLabel="All Colleges"
+                noun="College"
               />
             </FilterField>
             <FilterField label="Campus" htmlFor="student-list-campus">
-              <DependentSelect
+              <MultiSelectFilter
                 id="student-list-campus"
-                value={filters.campusId ?? ''}
-                onChange={(value) => setFilters((current) => ({ ...current, campusId: value }))}
-                options={campuses.map((campus) => ({ value: campus.id, label: campus.campusName }))}
-                placeholder="All campuses"
-                requires={filters.collegeId ? undefined : 'a college'}
+                value={cascade.filters.campusIds}
+                onChange={cascade.setCampuses}
+                options={cascade.campusOptions}
+                allLabel="All Campuses"
+                noun="Campus"
+                loading={cascade.loadingCampuses}
               />
             </FilterField>
             <FilterField label="Qualification" htmlFor="student-list-qualification">
-              <DependentSelect
+              <MultiSelectFilter
                 id="student-list-qualification"
-                value={filters.qualificationCode ?? ''}
-                onChange={(value) => setFilters((current) => ({ ...current, qualificationCode: value }))}
-                options={Array.from(
-                  new Map(
-                    offerings.map((entry) => [
-                      entry.qualificationCode,
-                      { value: entry.qualificationCode, label: entry.qualificationCode },
-                    ]),
-                  ).values(),
-                )}
-                placeholder="All qualifications"
-                requires={filters.collegeId ? undefined : 'a college'}
+                value={cascade.filters.qualificationIds}
+                onChange={cascade.setQualifications}
+                options={cascade.qualificationOptions}
+                allLabel="All Qualifications"
+                noun="Qualification"
+                loading={cascade.loadingQualifications}
+                emptyMessage="No qualifications are offered for the selected College and Campus."
               />
             </FilterField>
           </div>
@@ -254,7 +289,7 @@ export function StudentRecordsPanel({ onOpenStudent }: { onOpenStudent: (student
         rows={deletedRows}
         loading={recycleLoading}
         rowKey={(row) => row.id}
-        canRestore={permissions.deleteStudent}
+        canRestore={permissions.maintainStudentData}
         columns={[
           {
             id: 'studentId',

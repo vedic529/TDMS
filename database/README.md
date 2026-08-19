@@ -1,23 +1,41 @@
 # TDMS database
 
-No schema is committed yet, and TDMS is **not** connected to Supabase or any
-other production database.
+**Database Schema v1 was approved on 10 August 2026** and is implemented as
+SQLAlchemy 2 models plus an Alembic migration — see
+[`docs/database/`](../docs/database/).
 
-The SRS makes this a gate rather than a task:
+TDMS is still **not** connected to Supabase or any other production database.
+The SRS makes that a gate rather than a task:
 
 - **DATA-07** — the final database schema and relationships must be approved
   before Supabase or another production hosting service is connected.
 - **OD-13** — the final PostgreSQL schema, Supabase configuration or an
   alternative host must be approved before a production connection is made.
 
+## Where the schema actually lives
+
+Migrations are **not** in this folder. They live with the code that generates
+them, so a model change and its migration can be reviewed in one commit:
+
+```
+apps/api/app/models/     # SQLAlchemy 2 models — 27 tables
+apps/api/alembic/versions/   # migration scripts, applied with `alembic upgrade head`
+```
+
+Changing the schema: [`docs/database/migration-workflow.md`](../docs/database/migration-workflow.md).
+
 ## Structure
 
 ```
 database/
-├── migrations/   # versioned schema changes, added after the schema is approved
-├── seeds/        # approved non-personal reference data for staging/testing
-└── README.md
+├── migrations/   # unused — kept empty; migrations live in apps/api/alembic/versions
+└── seeds/        # unused — kept empty; the account bootstrap lives in
+                  # apps/api/app/db/seeds/ so it can use the ORM models
 ```
+
+The initial TDMS accounts are pre-provisioned by an explicit seed command rather
+than a migration, so a schema rebuild never silently re-inserts business data:
+[`docs/database/initial-access-seeding.md`](../docs/database/initial-access-seeding.md).
 
 ## Required data groups (SRS 10.1)
 
@@ -48,6 +66,10 @@ The approved schema must cover:
 
 ## Local development
 
-Local development currently uses the frontend prototype dataset held in browser
-storage under the `tdms.prototype.v1` keys. It contains demo records only and is
-never production information.
+A local PostgreSQL 17 database (`tdms_dev`) runs in Docker and holds the approved
+schema — 27 tables, 1 view, 15 enum types — with **no rows**. No reference data
+and no user accounts have been inserted.
+
+The frontend is not yet connected to it. It still uses the prototype dataset held
+in browser storage under the `tdms.prototype.v1` keys, which contains demo records
+only and is never production information.

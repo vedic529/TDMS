@@ -1,4 +1,12 @@
-import type { TdmsUser } from '@/types/auth';
+import type {
+  AccessRequest,
+  AccountStatus,
+  DashboardOverview,
+  NotificationOutcome,
+  RequestableRole,
+  TdmsRole,
+  TdmsUser,
+} from '@/types/auth';
 import type { ActivityFilters, UserActivityRecord } from '@/types/activity';
 import type { ImportBatch, ImportResult } from '@/types/import';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
@@ -6,6 +14,7 @@ import type { StudentFilters, StudentInput, StudentRecord } from '@/types/studen
 import type { TimetableFilters, TimetableInput, TimetableSession } from '@/types/timetable';
 import type { TrainerFilters, TrainerInput, TrainerRecord } from '@/types/trainer';
 
+import { getAuthProvider } from './auth';
 import type { ReferenceDataBundle } from './dataset';
 import type {
   ActionContext,
@@ -36,19 +45,35 @@ export class ApiTdmsClient implements TdmsClient {
 
   constructor(private readonly baseUrl: string) {}
 
+  /**
+   * Every API call goes through here, which is the only place the Authorization
+   * header is set. Repeating it per call site is how one endpoint eventually
+   * ships without it.
+   *
+   * The token is the **TDMS API access token** obtained by MSAL for the
+   * configured `api://…/access_as_user` scope — never the Microsoft ID token,
+   * which identifies the browser application rather than the caller and which
+   * the API refuses.
+   *
+   * It is held only in memory for the duration of the call. It is never logged
+   * and never written to localStorage.
+   */
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-      },
-      // The Microsoft Entra access token is attached here once OD-01 is
-      // approved and the MSAL adapter is connected.
-      credentials: 'include',
-    });
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...((init?.headers as Record<string, string> | undefined) ?? {}),
+    };
+
+    const accessToken = await getAuthProvider().getApiAccessToken();
+    if (accessToken) {
+      headers.Authorization = `Bearer ${accessToken}`;
+    }
+
+    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
 
     if (!response.ok) {
+      // The status is enough to act on; the body may carry user detail that
+      // does not belong in a thrown message.
       throw new Error(`TDMS API request failed: ${response.status} ${response.statusText}`);
     }
     return (await response.json()) as T;
@@ -294,7 +319,79 @@ export class ApiTdmsClient implements TdmsClient {
     const query = new URLSearchParams(
       Object.entries(filters).filter(([, value]) => Boolean(value)) as [string, string][],
     );
-    return this.request<UserActivityRecord[]>(`/activity-records?${query.toString()}`);
+    return this.request<UserActivityRecord[]>(`/admin/activity-records?${query.toString()}`);
+  }
+
+  // -- Access requests (Access Model v1.1) ---------------------------------
+  //
+  // These routes exist in the API today. The `_context` parameters are unused
+  // on purpose: the API identifies the actor from the verified Microsoft token,
+  // never from a value the browser supplies.
+
+  getMyAccessRequest(_userId: string): Promise<AccessRequest | null> {
+    return this.request<AccessRequest | null>('/me/access-request');
+  }
+
+  submitAccessRequest(
+    requestedRole: RequestableRole,
+    _context: ActionContext,
+  ): Promise<{ request: AccessRequest; notification: NotificationOutcome }> {
+    return this.request('/me/access-requests', {
+      method: 'POST',
+      body: JSON.stringify({ requested_role: requestedRole }),
+    });
+  }
+
+  cancelAccessRequest(id: string, _context: ActionContext): Promise<AccessRequest> {
+    return this.request<AccessRequest>(`/me/access-requests/${id}`, { method: 'DELETE' });
+  }
+
+  listAccessRequests(): Promise<AccessRequest[]> {
+    return this.request<AccessRequest[]>('/admin/access-requests');
+  }
+
+  approveAccessRequest(id: string, _context: ActionContext): Promise<AccessRequest> {
+    return this.request<AccessRequest>(`/admin/access-requests/${id}/approve`, { method: 'POST' });
+  }
+
+  denyAccessRequest(id: string, _context: ActionContext): Promise<AccessRequest> {
+    return this.request<AccessRequest>(`/admin/access-requests/${id}/deny`, { method: 'POST' });
+  }
+
+  /**
+   * Grant a person TDMS access directly. Super Admin only, enforced by the API.
+   *
+   * Two fields, because that is all a Super Admin is asked for. No display name
+   * is sent: Microsoft supplies it at first sign-in, and deriving one from the
+   * mailbox would store a guess as though someone had confirmed it.
+   */
+  provisionUser(organisationEmail: string, role: TdmsRole): Promise<TdmsUser> {
+    return this.request<TdmsUser>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ organisation_email: organisationEmail, access_level: role }),
+    });
+  }
+
+  changeUserRole(id: string, role: TdmsRole, _context: ActionContext): Promise<TdmsUser> {
+    return this.request<TdmsUser>(`/admin/users/${id}/role`, {
+      method: 'POST',
+      body: JSON.stringify({ access_level: role }),
+    });
+  }
+
+  changeUserAccountStatus(
+    id: string,
+    status: AccountStatus,
+    _context: ActionContext,
+  ): Promise<TdmsUser> {
+    return this.request<TdmsUser>(`/admin/users/${id}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ account_status: status }),
+    });
+  }
+
+  getDashboardOverview(): Promise<DashboardOverview> {
+    return this.request<DashboardOverview>('/admin/overview');
   }
 
   recordActivity(

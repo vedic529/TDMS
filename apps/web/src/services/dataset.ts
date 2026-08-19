@@ -9,7 +9,7 @@ import type {
 import type { StudentRecord } from '@/types/student';
 import type { TimetableSession } from '@/types/timetable';
 import type { TrainerRecord } from '@/types/trainer';
-import type { TdmsUser } from '@/types/auth';
+import type { AccessRequest, TdmsUser } from '@/types/auth';
 import type { UserActivityRecord } from '@/types/activity';
 import type { ImportBatch } from '@/types/import';
 
@@ -29,6 +29,8 @@ export interface TdmsDataset {
   students: StudentRecord[];
   timetableSessions: TimetableSession[];
   users: TdmsUser[];
+  /** Access Model v1.1 role requests, newest last. */
+  accessRequests: AccessRequest[];
   activityRecords: UserActivityRecord[];
   importBatches: ImportBatch[];
 }

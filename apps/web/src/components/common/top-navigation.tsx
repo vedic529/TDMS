@@ -80,7 +80,13 @@ export function TopNavigation() {
         <div className="ml-auto flex items-center gap-2">
           {env.appEnvironment !== 'production' && (
             <Badge variant="warning" className="hidden sm:inline-flex" title="Demo data. Not production information.">
-              {env.appEnvironment === 'development' ? 'Development · demo data' : 'Staging'}
+              {/*
+                No longer "demo data": the operational reference, course, trainer
+                and qualification records now come from the approved source
+                workbooks. Saying otherwise invites people to disregard data that
+                is real, which is the opposite of the warning's purpose.
+              */}
+              {env.appEnvironment === 'development' ? 'Development · source data' : 'Staging'}
             </Badge>
           )}
           <QuickFind />

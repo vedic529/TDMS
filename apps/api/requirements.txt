@@ -1,13 +1,27 @@
-# TDMS API - minimal dependency set for the current skeleton.
+# TDMS API dependencies.
 #
-# Only what is needed to start FastAPI and read configuration. Further packages
-# (SQLAlchemy, Alembic, a PostgreSQL driver, Microsoft authentication libraries,
-# openpyxl) are added when the matching feature is implemented, not before.
+# Step 3 adds the database layer for the approved Database Schema v1:
+# SQLAlchemy 2 (ORM), Alembic (migrations) and Psycopg 3 (PostgreSQL driver).
+# The SQLAlchemy URL scheme is `postgresql+psycopg://` — Psycopg 3, not psycopg2.
+#
+# Step 5 adds Microsoft Entra ID sign-in: PyJWT validates the access token
+# signature against the tenant's published JWKS. `[crypto]` pulls in the RSA
+# support that makes signature verification real rather than decorative.
+#
+# Still deliberately absent: openpyxl. It arrives with the feature that needs it.
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 python-dotenv==1.0.1
+
+# Database
+SQLAlchemy==2.0.51
+alembic==1.19.1
+psycopg[binary]==3.3.4
+
+# Authentication
+pyjwt[crypto]==2.10.1
 
 # Testing
 pytest==8.3.4

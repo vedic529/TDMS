@@ -1,5 +1,24 @@
 import type { StagedRowIssue, StagedStudentRow } from '@/types/import';
-import type { TdmsDataset } from './dataset';
+import type { StudentRecord } from '@/types/student';
+import { validateGroup } from '@/lib/student-rules';
+import type { Campus, College, QualificationOffering } from '@/types/reference';
+
+/**
+ * The approved reference values a staged row is checked against.
+ *
+ * Narrowed to the three lists this module actually reads so that **real**
+ * reference data can be passed in. It used to take the whole prototype dataset,
+ * which meant a student file carrying a genuine campus address —
+ * `132-146 Elizabeth Street, HOBART, Tasmania 7000` — was compared against an
+ * invented one and rejected as unmatched.
+ */
+export interface ReferenceLookups {
+  colleges: College[];
+  campuses: Campus[];
+  qualificationOfferings: QualificationOffering[];
+  /** Existing students, for the DATA-01 duplicate Student ID check. */
+  students: Array<Pick<StudentRecord, 'studentId' | 'isDeleted'>>;
+}
 
 /**
  * Bulk Student Import staging validation (BULK-04).
@@ -16,38 +35,88 @@ import type { TdmsDataset } from './dataset';
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function matchCollege(dataset: TdmsDataset, value: string) {
-  const needle = value.trim().toLowerCase();
+/**
+ * Characters that look like a space but are not one.
+ *
+ * A student file carrying `Tasmania 7000` and a database holding
+ * `Tasmania 7000` are identical on screen and different to a comparison. That
+ * single non-breaking space rejected a campus that matches exactly. Zero-width
+ * characters cause the same failure while being invisible even in an error
+ * message.
+ */
+const INVISIBLE = /[ ​‌‍﻿]/g;
+
+/** Compare a source value with approved reference data. */
+function normalise(value: string): string {
+  return value.replace(INVISIBLE, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Personal Email may hold several addresses separated by commas.
+ *
+ * Students supply more than one — a personal address and an agent's, or two of
+ * their own. Approved 14 August 2026: they are stored comma-separated, and each
+ * address is validated on its own so one malformed entry is reported rather than
+ * the whole field being called invalid.
+ */
+export function splitEmails(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.replace(INVISIBLE, ' ').trim())
+    .filter(Boolean);
+}
+
+function invalidEmails(value: string): string[] {
+  return splitEmails(value).filter((entry) => !EMAIL.test(entry));
+}
+
+function matchCollege(dataset: ReferenceLookups, value: string) {
+  const needle = normalise(value);
   if (!needle) return undefined;
   return dataset.colleges.find(
     (college) =>
-      college.collegeFullName.toLowerCase() === needle || college.collegeShortName.toLowerCase() === needle,
+      normalise(college.collegeFullName) === needle ||
+      normalise(college.collegeShortName) === needle,
   );
 }
 
-function matchCampus(dataset: TdmsDataset, collegeId: string | undefined, value: string) {
-  const needle = value.trim().toLowerCase();
+function matchCampus(dataset: ReferenceLookups, collegeId: string | undefined, value: string) {
+  const needle = normalise(value);
   if (!needle) return undefined;
   return dataset.campuses.find(
     (campus) =>
       (!collegeId || campus.collegeId === collegeId) &&
-      (campus.campusName.toLowerCase() === needle || campus.campusLocation.toLowerCase() === needle),
+      (normalise(campus.campusName) === needle ||
+        normalise(campus.campusLocation) === needle ||
+        // One site, several spellings across source systems.
+        (campus.sourceAddresses ?? []).some((address) => normalise(address) === needle)),
   );
 }
 
-function matchQualification(dataset: TdmsDataset, collegeId?: string, campusId?: string, value?: string) {
-  const needle = (value ?? '').trim().toLowerCase();
+function matchQualification(
+  dataset: ReferenceLookups,
+  collegeId?: string,
+  campusId?: string,
+  value?: string,
+) {
+  const needle = normalise(value ?? '');
   if (!needle) return undefined;
   return dataset.qualificationOfferings.find(
     (offering) =>
       (!collegeId || offering.collegeId === collegeId) &&
       (!campusId || offering.campusId === campusId) &&
-      (offering.qualificationCode.toLowerCase() === needle ||
-        offering.qualificationTitle.toLowerCase() === needle),
+      (normalise(offering.qualificationCode) === needle ||
+        normalise(offering.qualificationTitle) === needle ||
+        // A student enrolled under a retired code is in the current
+        // qualification — CHC30121 resolves to CHC30125.
+        (offering.supersededCodes ?? []).some((code) => normalise(code) === needle)),
   );
 }
 
-export function validateStagedRows(rows: StagedStudentRow[], dataset: TdmsDataset): StagedStudentRow[] {
+export function validateStagedRows(
+  rows: StagedStudentRow[],
+  dataset: ReferenceLookups,
+): StagedStudentRow[] {
   const idCounts = new Map<string, number>();
   rows.forEach((row) => {
     if (row.status === 'Excluded by user') return;
@@ -149,12 +218,29 @@ export function validateStagedRows(rows: StagedStudentRow[], dataset: TdmsDatase
         message: 'Proposed End Date must be after Proposed Start Date.',
       });
     }
-    if (row.personalEmail.trim() && !EMAIL.test(row.personalEmail.trim())) {
+    const badEmails = invalidEmails(row.personalEmail);
+    if (badEmails.length > 0) {
       issues.push({
         field: 'Personal Email',
-        message: `Personal Email "${row.personalEmail}" is not a valid email address. Correct or clear the value.`,
+        message:
+          badEmails.length === 1
+            ? `Personal Email "${badEmails[0]}" is not a valid email address. Correct or clear the value.`
+            : `Personal Email contains ${badEmails.length} invalid addresses: ${badEmails
+                .map((entry) => `"${entry}"`)
+                .join(', ')}. Separate several addresses with commas.`,
       });
     }
+    // Group must match the qualification, using the same rule as Single
+    // Student Entry. Only checked once the qualification resolves - reporting
+    // "Group 5 is invalid" for a row whose qualification is unrecognised would
+    // send the user to correct the wrong field.
+    if (offering) {
+      const groupProblem = validateGroup(offering.qualificationCode, row.group);
+      if (groupProblem) {
+        issues.push({ field: 'Group', message: groupProblem });
+      }
+    }
+
     if (row.coeStatus.trim() && !['CoE', 'Non-CoE'].includes(row.coeStatus.trim())) {
       issues.push({
         field: 'CoE / Non-CoE',

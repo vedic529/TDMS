@@ -50,14 +50,22 @@ export function AccountStatusBadge({ status }: { status: AccountStatus }) {
   );
 }
 
-const COURSE_STATUS_STYLE: Record<CourseStatus, { variant: 'success' | 'neutral' | 'warning' }> = {
-  Active: { variant: 'success' },
-  Inactive: { variant: 'neutral' },
-  Superseded: { variant: 'warning' },
+const COURSE_STATUS_STYLE: Record<string, 'success' | 'neutral' | 'warning'> = {
+  Active: 'success',
+  Inactive: 'neutral',
+  Superseded: 'warning',
 };
 
+/**
+ * Renders the status the backend supplied, styling the three it recognises.
+ *
+ * An approved status this build has never heard of gets a neutral badge and its
+ * own label — never a substituted one. Previously an unknown value indexed a
+ * closed lookup and was relabelled, which turned a backend value into a
+ * frontend opinion.
+ */
 export function CourseStatusBadge({ status }: { status: CourseStatus }) {
-  return <Badge variant={COURSE_STATUS_STYLE[status].variant}>{status}</Badge>;
+  return <Badge variant={COURSE_STATUS_STYLE[status] ?? 'neutral'}>{status}</Badge>;
 }
 
 export function ActiveBadge({ isActive }: { isActive: boolean }) {

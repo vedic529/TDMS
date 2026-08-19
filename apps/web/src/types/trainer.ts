@@ -4,7 +4,7 @@ import type { SoftDeletable } from './common';
 export type WeekdayAvailability = 'Not Available' | 'Physical' | 'Virtual';
 
 /** SRS 8.3 - Delivery Type applies to theory or practical delivery. */
-export type TrainerDeliveryType = 'Theory' | 'Practical' | 'Theory and Practical';
+export type TrainerClassType = 'Theory' | 'Practical' | 'Theory and Practical';
 
 export type TrainerLocationType = 'Campus' | 'Kitchen' | 'Workshop' | 'Virtual';
 
@@ -19,7 +19,7 @@ export interface TrainerRecord extends SoftDeletable {
   location: string;
   locationType: TrainerLocationType;
   workingTime: string;
-  deliveryType: TrainerDeliveryType;
+  classType: TrainerClassType;
   monday: WeekdayAvailability;
   tuesday: WeekdayAvailability;
   wednesday: WeekdayAvailability;
@@ -42,7 +42,7 @@ export interface TrainerFilters {
   qualificationCode?: string;
   campusId?: string;
   location?: string;
-  deliveryType?: TrainerDeliveryType;
+  classType?: TrainerClassType;
   status?: 'active' | 'inactive' | 'all';
   search?: string;
 }

@@ -28,7 +28,7 @@ export const MOCK_FACILITIES: Facility[] = [
 ];
 
 /**
- * OD-11: the MSCRIS class name is expected to be "Virtual Classroom", but the
- * full term and business purpose are not yet confirmed.
+ * OD-11 approved: an MSCRIS additional class is delivered virtually only, and
+ * MSCRIS Class Name always holds this single fixed value.
  */
-export const MSCRIS_CLASS_NAME_OPTIONS = ['Virtual Classroom'];
+export const MSCRIS_CLASS_NAME = 'Virtual Classroom';

@@ -24,12 +24,12 @@ accordingly.
 | AUTH-01 | `(app)/layout.tsx` redirects to `/login` without a session |
 | AUTH-02 | `services/auth/entra-auth-provider.ts` is the Entra seam; `lib/env.ts` reports whether the tenant is configured |
 | AUTH-03 | No password field exists anywhere; the login screen states TDMS never receives one |
-| AUTH-04 | `MockAuthProvider.signIn()` matches the account to one internal `TdmsUser` |
+| AUTH-04 | `MockAuthProvider.signIn()` matches the account to one internal `TdmsUser`. No email-domain check exists anywhere: a domain suffix is never treated as authorisation (OD-01) |
 | AUTH-05 | `accessDecisionFor()` denies `INACTIVE` and `DISABLED` accounts |
 | AUTH-06 | The authenticated shell guards every operational route, including direct addresses |
 | AUTH-07 | `/` and the login screen both redirect a granted user to `/timetable` |
 | AUTH-08 | A failure returns `AuthFailure` and writes no session |
-| AUTH-09 | Sign out is in the account menu. **Timeout: OD-03, not implemented** — stated in Account information |
+| AUTH-09 | Sign out is in the account menu. The approved 30-minute inactivity timeout is enforced in `auth-context.tsx` using `lib/session.ts`. No maximum session duration is applied — that part of OD-03 is still open |
 | AUTH-10 | `AuthFailure.userMessage` is a general message; the correlation ID is shown as a reference |
 | AUTH-11 | `AuthSession.correlationId` is stored and displayed in Account information |
 | AUTH-12 | `restoreSession()` re-reads the user; the development preview demonstrates it |
@@ -55,7 +55,7 @@ accordingly.
 | TT-03 | `MockTdmsClient.listTimetableSessions` uses `rangesOverlap`; the empty state says "No timetable sessions match the selected filters." |
 | TT-04 | Create and Generate open `TimetableFormDrawer`; Preview precedes Save |
 | TT-05 | Every controlled field is a reference-data dropdown |
-| TT-06 | Trainer, facility and student-group clash checks are blocking; override is Admin/Super Admin only and records a reason |
+| TT-06 | Trainer, facility and student-group clash checks are blocking; override is Admin/Super Admin only and records a reason. **MSCRIS slots are excluded from all three checks (OD-11 approved)**, and the preview panel warns the user |
 | TT-07 | Each clash message names the conflicting record, day, time and date range |
 | TT-08 | Approved duration options and approved unit sequence are checked |
 | TT-09/10/11 | **OD-07** — displayed as an "Awaiting approval" check that produces no result |
@@ -70,14 +70,14 @@ accordingly.
 | --- | --- |
 | SST-01 | Search, create, view, edit and delete in `single-student-entry.tsx` |
 | SST-02 | College → Campus → Qualification dependent dropdowns from reference data |
-| SST-03 | `lib/student-rules.ts` — generated values, **labelled provisional** |
+| SST-03 | `lib/student-rules.ts`. Actual Course Duration uses the approved inclusive rule. Intake and Group remain **labelled provisional** — those generation rules have not been supplied |
 | SST-04 | Preview sheet shows the complete record and every validation message; nothing is written |
 | SST-05 | Blank Student ID is a Zod error; duplicates are checked through `isStudentIdAvailable` |
 | SST-06 | Save is disabled until `canSave`, then a confirmation dialog is required |
 | SST-07 | `ChangeSummaryDialog` lists old → new for every changed field |
 | SST-08 | `DeleteConfirmationDialog` with mandatory reason and soft deletion |
 | SST-09 | Every outcome writes a user activity record |
-| SST-10 | **OD-08** — CT definition, Course Duration Option rule and week calculation marked "Awaiting approval" |
+| SST-10 | **OD-08 approved and implemented.** CT = Credit Transfer, flag only; Course Duration Option is always shown and staff-selected, validated against the approved options; Actual Course Duration uses inclusive dates (`lib/student-rules.ts`) |
 
 ## Bulk Student Import (BULK)
 
@@ -114,15 +114,23 @@ accordingly.
 
 | ID | Where |
 | --- | --- |
-| COL-01 | Campus depends on College everywhere |
-| COL-02 | `offeringsFor(collegeId, campusId)` limits qualifications to the selection |
-| COL-03 | All displayed values come from reference data |
-| COL-04 | Duplicate offering check in the course form (college + campus + VET code) |
-| COL-05 | Inactive and Superseded courses stay visible; only active offerings are selectable |
-| COL-06 | `ExportMenu` on both tabs |
-| COL-07 | `canMaintainCourseData` — Admin and Super Admin only |
-| COL-08 | Every create, edit, delete and export writes a user activity record |
-| COL-09 | **OD-09** — facility data is used for selection, capacity and clash checking only |
+| COL-01 | **REAL (Step 6).** `GET /reference/campuses?college_id=` applies the `college_campuses` approval **in SQL**; `require_approved_combination()` re-checks any submitted pair, so two separately-valid IDs are not accepted as an approved combination |
+| COL-02 | **REAL.** `GET /reference/courses?college_id=&campus_id=` and `GET /reference/units?qualification_id=` filter server-side |
+| COL-03 | **REAL.** Every displayed value comes from PostgreSQL; the module has no mock fallback |
+| COL-04 | **REAL.** `_reject_duplicate_offering()` plus the approved `UNIQUE (college_id, campus_id, qualification_id)` constraint; friendly message, 409 |
+| COL-05 | **REAL.** `selectable_for_new_records` gates new records; retired statuses stay visible on historical ones. `?active_only=` separates the two lists |
+| COL-06 | `ExportMenu` on both tabs, honouring the current search and filters |
+| COL-07 | **REAL.** `require_maintain_reference_data` — **Admin and Super Admin only**. A Data Editor is read-and-download here; every write verb returns 403, tested directly |
+| COL-08 | **REAL.** Create, edit, delete and restore write a user activity record with the actor derived from the verified `tid + oid`. Reads are deliberately not logged |
+| COL-09 | **OD-09** — facility data is used for selection, capacity and clash checking only. Facilities remain out of Step 6 scope |
+
+> **Step 6 (11 August 2026): College and Course Reference Data is the first module on the real
+> Next.js → FastAPI → SQLAlchemy → PostgreSQL stack.** 16 `/reference/*` routes, no new migration
+> required. DATA-01 (approved values, not free text), DATA-03 (retired values retained and
+> excluded from new selections), DATA-04 (soft delete with reason, actor and recovery deadline),
+> DATA-05 (multi-entity writes in one transaction) and AC-12 (implemented names match the SRS,
+> per the resolved C-1…C-6) are all exercised by the real API.
+> Detail: [`docs/integration/reference-data-integration.md`](../integration/reference-data-integration.md).
 
 ## Data (DATA) and non-functional (NFR)
 

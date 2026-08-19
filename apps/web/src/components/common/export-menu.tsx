@@ -59,7 +59,6 @@ export function ExportMenu<T>({
     await getTdmsClient().recordActivity({
       userReference: user.organisationEmail,
       accessLevel: user.role,
-      assignment: user.assignment,
       pageOrFunction: pageReference,
       action: 'Export',
       recordOrBatchReference: `${result.rowCount} rows`,
@@ -67,13 +66,9 @@ export function ExportMenu<T>({
       plainLanguageDetail: `Filtered result exported as ${result.fileName} (${result.rowCount} rows).`,
     });
 
-    if (result.status === 'demo-fallback') {
-      toast.info('XLSX export is not implemented yet', { description: result.notice, duration: 8000 });
-    } else {
-      toast.success('Export complete', {
-        description: `${result.rowCount} filtered ${result.rowCount === 1 ? 'row' : 'rows'} downloaded as ${result.fileName}.`,
-      });
-    }
+    toast.success('Export complete', {
+      description: `${result.rowCount} filtered ${result.rowCount === 1 ? 'row' : 'rows'} downloaded as ${result.fileName}.`,
+    });
   }
 
   return (

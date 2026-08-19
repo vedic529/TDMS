@@ -94,7 +94,6 @@ export interface ExportResult {
   format: ExportFormat;
   fileName: string;
   rowCount: number;
-  /** `generated` = a real file was produced. `demo-fallback` = see `notice`. */
-  status: 'generated' | 'demo-fallback';
-  notice?: string;
+  /** Both CSV and XLSX produce a real file, so this is always `generated`. */
+  status: 'generated';
 }

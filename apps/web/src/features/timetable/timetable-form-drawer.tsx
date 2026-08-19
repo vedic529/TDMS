@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowLeft, Eye, Loader2, Save, Wand2 } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Eye, Loader2, Save, Wand2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -30,7 +30,7 @@ import { useReferenceData } from '@/features/shared/reference-data-context';
 import { useAuth } from '@/features/auth/auth-context';
 import { getTdmsClient } from '@/services';
 import { addDays, formatDate, formatSlots } from '@/lib/format';
-import { MSCRIS_CLASS_NAME_OPTIONS } from '@/mock-data';
+import { MSCRIS_CLASS_NAME } from '@/mock-data';
 import type { ValidationResult } from '@/types/common';
 import type { TimetableInput, TimetableSession } from '@/types/timetable';
 import type { UocType } from '@/types/reference';
@@ -155,6 +155,19 @@ export function TimetableFormDrawer({
     setStep('form');
   }
 
+  /**
+   * OD-11 approved: MSCRIS Class Name always holds the single fixed value, so
+   * it is set as soon as any MSCRIS detail is entered and cleared when the
+   * section is emptied again.
+   */
+  React.useEffect(() => {
+    const hasDetail = input.mscrisDaysAndTimes.length > 0 || input.mscrisTrainerId.trim() !== '';
+    const expected = hasDetail ? MSCRIS_CLASS_NAME : '';
+    if (input.mscrisClassName !== expected) {
+      setInput((current) => ({ ...current, mscrisClassName: expected }));
+    }
+  }, [input.mscrisDaysAndTimes, input.mscrisTrainerId, input.mscrisClassName]);
+
   // ------------------------------------------------------------- selections
   const campuses = campusesForCollege(input.collegeId);
   const offerings = offeringsFor(input.collegeId, input.campusId);
@@ -168,7 +181,7 @@ export function TimetableFormDrawer({
         entry.qualificationCode === input.qualificationCode &&
         (!input.campusId || entry.campusId === input.campusId),
     )
-    .sort((a, b) => a.sequenceId - b.sequenceId);
+    .sort((a, b) => a.deliveryOrder - b.deliveryOrder);
 
   const eligibleTrainers = (data?.trainers ?? []).filter(
     (trainer) => trainer.isActive && trainer.qualificationsCanTeach.includes(input.qualificationCode),
@@ -546,7 +559,7 @@ export function TimetableFormDrawer({
                           onChange={selectUnit}
                           options={unitSequence.map((entry) => ({
                             value: entry.unitCode,
-                            label: `${entry.sequenceId}. ${entry.unitCode} — ${entry.unitTitle}`,
+                            label: `${entry.deliveryOrder}. ${entry.unitCode} — ${entry.unitTitle}`,
                           }))}
                           placeholder="Select unit of competency"
                           requires={input.qualificationCode ? undefined : 'a qualification'}
@@ -693,32 +706,51 @@ export function TimetableFormDrawer({
                   </FormField>
                 </FormSection>
 
-                <FormSection title="MSCRIS">
+                <FormSection
+                  title="MSCRIS"
+                  description="Additional classes, particularly additional classes arranged for specific topics. Delivered virtually and completed only when an additional class is required."
+                >
+                  <Alert variant="warning">
+                    <AlertTriangle aria-hidden="true" />
+                    <AlertDescription>
+                      MSCRIS classes are excluded from trainer, student-group and facility clash checking, and the
+                      MSCRIS Trainer is free text. Check the day, time and trainer manually before saving.
+                    </AlertDescription>
+                  </Alert>
                   <PendingRuleNotice
                     decisionId="OD-11"
-                    message="The full MSCRIS term, business purpose and final field rules are not confirmed. The fields are captured and displayed, but no MSCRIS business rule is applied."
+                    message="MSCRIS is required only in certain cases, but the exact condition has not been supplied. TDMS treats the section as optional and never blocks a save because it is empty."
                   />
                   <FormGrid>
-                    <FormField label="MSCRIS Class Name" htmlFor="tt-mscris-name">
-                      <SimpleSelect
-                        id="tt-mscris-name"
-                        value={input.mscrisClassName}
-                        onChange={(value) => update('mscrisClassName', value)}
-                        options={MSCRIS_CLASS_NAME_OPTIONS.map((name) => ({ value: name, label: name }))}
-                        placeholder="Select class name"
-                      />
+                    <FormField
+                      label="MSCRIS Class Name"
+                      htmlFor="tt-mscris-name"
+                      generated
+                      hint={`Fixed approved value. An MSCRIS class is always delivered virtually, so the name is always "${MSCRIS_CLASS_NAME}".`}
+                    >
+                      <Input id="tt-mscris-name" value={input.mscrisClassName} readOnly placeholder="Set automatically" />
                     </FormField>
-                    <FormField label="MSCRIS Trainer" htmlFor="tt-mscris-trainer">
-                      <DependentSelect
+                    <FormField
+                      label="MSCRIS Trainer"
+                      htmlFor="tt-mscris-trainer"
+                      hint="Free text. Approved trainers are suggested, but any name may be entered."
+                    >
+                      <Input
                         id="tt-mscris-trainer"
+                        list="tt-mscris-trainer-options"
                         value={input.mscrisTrainerId}
-                        onChange={(value) => update('mscrisTrainerId', value)}
-                        options={trainerOptions}
-                        placeholder="Select approved trainer"
-                        requires={input.qualificationCode ? undefined : 'a qualification'}
+                        onChange={(event) => update('mscrisTrainerId', event.target.value)}
+                        placeholder="Enter the trainer taking the additional class"
                       />
                     </FormField>
                   </FormGrid>
+                  <datalist id="tt-mscris-trainer-options">
+                    {trainerOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </datalist>
                   <FormField label="MSCRIS Days and Times" htmlFor="tt-mscris-slots">
                     <SlotEditor
                       id="tt-mscris-slots"

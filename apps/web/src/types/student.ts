@@ -3,7 +3,11 @@ import type { IsoDate, IsoDateTime, SoftDeletable } from './common';
 /** SRS 6.3 - CoE / Non-CoE. */
 export type CoeStatus = 'CoE' | 'Non-CoE';
 
-/** SRS 6.3 - CT Student is a Yes/No selection. OD-08 keeps the CT definition open. */
+/**
+ * SRS 6.3 - CT Student is a Yes/No selection.
+ * CT means Credit Transfer (confirmed under OD-08). What the flag records and
+ * how it affects course duration are still awaiting approval.
+ */
 export type YesNo = 'Yes' | 'No';
 
 /**
@@ -17,8 +21,23 @@ export interface StudentRecord extends SoftDeletable {
   id: string;
 
   // Identification and college
+  /**
+   * Approved 11 August 2026: staff select `Group 1`...`Group N` for the ten
+   * group-enabled qualifications, and `N/A` for every other one.
+   */
   group: string;
-  intake: string;
+  /**
+   * ISO date (`YYYY-MM-01`) - the first day of the proposed start month.
+   *
+   * Stored as a date so sorting and filtering stay correct; the approved
+   * `DD-MMM-YYYY` form is applied at the display and export boundary only.
+   */
+  /**
+   * `null` for a Credit Transfer student, for whom an intake does not apply
+   * (approved 13 August 2026). Rendered as `N/A`, which distinguishes "does not
+   * apply" from an empty cell meaning "missing".
+   */
+  intake: string | null;
   collegeId: string;
   campusId: string;
   collegeEmail: string;

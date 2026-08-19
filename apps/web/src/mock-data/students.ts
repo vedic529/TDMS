@@ -3,12 +3,14 @@ import { MOCK_CAMPUSES, MOCK_COLLEGES } from './colleges';
 import { qualificationByCode } from './qualifications';
 import { anchorDate, anchorDateTime } from './anchor';
 import {
+  MAX_NUMBERED_GROUP,
+  NO_GROUP,
   deriveActualCourseDuration,
   deriveCollegeEmail,
-  deriveGroup,
-  deriveIntake,
+  deriveIntakeDate,
   deriveState,
   suggestCourseDurationOption,
+  usesNumberedGroups,
 } from '@/lib/student-rules';
 
 interface StudentSeed {
@@ -66,8 +68,15 @@ export const MOCK_STUDENTS: StudentRecord[] = SEEDS.map((seed, index) => {
 
   return {
     id: `stu-${seed.studentId.toLowerCase()}`,
-    group: deriveGroup({ qualificationCode: seed.qualificationCode, campus, proposedStartDate }),
-    intake: deriveIntake(proposedStartDate),
+    // Group is chosen by staff, not generated. The demo dataset spreads
+    // students across the numbered range for the ten group-enabled
+    // qualifications, and uses N/A for every other one.
+    group: usesNumberedGroups(seed.qualificationCode)
+      ? `Group ${(index % MAX_NUMBERED_GROUP) + 1}`
+      : NO_GROUP,
+    // Stored as an ISO date; the approved DD-MMM-YYYY form is applied at the
+    // display and export boundary.
+    intake: deriveIntakeDate(proposedStartDate),
     collegeId: college.id,
     campusId: campus.id,
     collegeEmail: deriveCollegeEmail(seed.studentId, college),

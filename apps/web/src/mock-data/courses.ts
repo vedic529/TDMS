@@ -18,16 +18,15 @@ export const MOCK_COURSES: CourseRecord[] = MOCK_QUALIFICATION_OFFERINGS.map((of
     collegeId: offering.collegeId,
     campusId: offering.campusId,
     courseCode: `${offering.qualificationCode}-${campus.state}`,
-    vetCode: offering.qualificationCode,
+    qualificationCode: offering.qualificationCode,
     courseStatus,
-    courseName: definition.qualificationTitle,
+    qualificationTitle: definition.qualificationTitle,
     courseLevel: definition.courseLevel,
     fieldOfEducationBroad: definition.fieldOfEducationBroad,
     fieldOfEducationNarrow: definition.fieldOfEducationNarrow,
     courseSector: definition.courseSector,
     durationInWeeks: definition.durationOptions[definition.durationOptions.length - 1],
     totalCourseCost: definition.totalCourseCost,
-    location: campus.campusLocation,
     isDeleted: false,
   } satisfies CourseRecord;
 });

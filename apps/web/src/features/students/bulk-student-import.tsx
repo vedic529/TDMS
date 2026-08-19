@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Download,
   FileSpreadsheet,
+  ListChecks,
   Loader2,
   RefreshCw,
   Save,
@@ -41,6 +42,8 @@ import { ImportStatusBadge } from '@/components/common/status-badge';
 import { ConfirmationDialog } from '@/components/common/confirmation-dialog';
 import { ImportSummary, CountTile } from '@/components/common/import-summary';
 import { EmptyState, ReadOnlyNotice } from '@/components/common/states';
+import { ImportErrorReview } from '@/features/students/import-error-review';
+import { isBlockingStatus } from '@/features/students/import-error-selection';
 import { useAuth } from '@/features/auth/auth-context';
 import { getTdmsClient } from '@/services';
 import { countByStatus } from '@/services/import-validation';
@@ -60,6 +63,9 @@ const EDITABLE_COLUMNS: Array<{ key: keyof StagedStudentRow & string; label: str
   { key: 'collegeValue', label: 'College', width: 'w-40' },
   { key: 'campusValue', label: 'Campus', width: 'w-32' },
   { key: 'qualificationValue', label: 'Qualification', width: 'w-32' },
+  // Before Group, matching the template: CT decides whether Group applies.
+  { key: 'ctStudent', label: 'CT Student', width: 'w-24' },
+  { key: 'group', label: 'Group', width: 'w-28' },
   { key: 'coeStatus', label: 'CoE / Non-CoE', width: 'w-28' },
   { key: 'proposedStartDate', label: 'Proposed Start Date', width: 'w-36' },
   { key: 'proposedEndDate', label: 'Proposed End Date', width: 'w-36' },
@@ -80,7 +86,20 @@ export function BulkStudentImport() {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [xlsxNotice, setXlsxNotice] = React.useState(false);
 
-  const canImport = permissions.processBulkStudentImport;
+  const canImport = permissions.maintainStudentData;
+
+  /** The Errors identified section, so the staging area can scroll to it. */
+  const errorsRef = React.useRef<HTMLDivElement>(null);
+
+  const errorRows = React.useMemo(
+    () => (batch ? batch.rows.filter((row) => isBlockingStatus(row.status)) : []),
+    [batch],
+  );
+
+  function goToErrors() {
+    errorsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    errorsRef.current?.focus({ preventScroll: true });
+  }
 
   async function handleFile(file: File) {
     if (!user) return;
@@ -154,6 +173,25 @@ export function BulkStudentImport() {
     );
   }
 
+  /**
+   * Removes staged rows outright.
+   *
+   * This is not a record deletion: the rows have never been written, so there is
+   * nothing to soft-delete and no reason code applies (DATA-04 governs saved
+   * records). The uploaded file is untouched, so the rows return by uploading it
+   * again.
+   */
+  function deleteRows(rows: StagedStudentRow[]) {
+    const ids = new Set(rows.map((row) => row.id));
+    if (ids.size === 0) return;
+    setBatch((current) =>
+      current ? { ...current, rows: current.rows.filter((row) => !ids.has(row.id)) } : current,
+    );
+    toast.success(`${ids.size} error ${ids.size === 1 ? 'row' : 'rows'} deleted from the staging area`, {
+      description: 'Nothing was written to the database, and your uploaded file is unchanged.',
+    });
+  }
+
   async function revalidate() {
     if (!batch) return;
     setBusy(true);
@@ -194,7 +232,6 @@ export function BulkStudentImport() {
     await getTdmsClient().recordActivity({
       userReference: user.organisationEmail,
       accessLevel: user.role,
-      assignment: user.assignment,
       pageOrFunction: SRS_PAGE_REFERENCE.bulkStudentImport,
       action: 'Export',
       recordOrBatchReference: `${batch.batchReference} · ${rowCount} rows`,
@@ -208,6 +245,7 @@ export function BulkStudentImport() {
     const outcome = exportRows({
       format,
       baseFileName: `tdms-bulk-import-preview-${today()}`,
+      sheetName: 'Staged rows',
       rows: batch.rows,
       columns: [
         { header: 'Source Row Number', value: (row) => row.sourceRowNumber },
@@ -217,6 +255,8 @@ export function BulkStudentImport() {
         { header: 'College', value: (row) => row.collegeValue },
         { header: 'Campus', value: (row) => row.campusValue },
         { header: 'Qualification', value: (row) => row.qualificationValue },
+        { header: 'CT Student', value: (row) => row.ctStudent },
+        { header: 'Group', value: (row) => row.group },
         { header: 'CoE / Non-CoE', value: (row) => row.coeStatus },
         { header: 'Proposed Start Date', value: (row) => row.proposedStartDate },
         { header: 'Proposed End Date', value: (row) => row.proposedEndDate },
@@ -225,7 +265,48 @@ export function BulkStudentImport() {
     });
     void recordDownload('Bulk student import preview', outcome.rowCount, outcome.fileName);
     toast.success('Preview downloaded', { description: `${outcome.rowCount} staged rows in ${outcome.fileName}.` });
-    if (outcome.notice) toast.info('XLSX export is not implemented yet', { description: outcome.notice });
+  }
+
+  /**
+   * The identified error rows, written back in the approved template's own
+   * columns and order so the downloaded file can be corrected and uploaded
+   * again as it stands. The three diagnostic columns are appended, and the
+   * reader matches columns by name, so they are ignored on the way back in.
+   */
+  function downloadErrorRows(format: ExportFormat, rows: StagedStudentRow[]) {
+    if (rows.length === 0) return;
+    const outcome = exportRows({
+      format,
+      baseFileName: `tdms-bulk-import-errors-${today()}`,
+      sheetName: 'Errors identified',
+      rows,
+      columns: [
+        { header: 'Source Row Number', value: (row) => row.sourceRowNumber },
+        { header: 'Student ID', value: (row) => row.studentId },
+        { header: 'First Name', value: (row) => row.firstName },
+        { header: 'Last Name', value: (row) => row.lastName },
+        { header: 'College', value: (row) => row.collegeValue },
+        { header: 'Campus', value: (row) => row.campusValue },
+        { header: 'Qualification', value: (row) => row.qualificationValue },
+        { header: 'CT Student', value: (row) => row.ctStudent },
+        { header: 'Group', value: (row) => row.group },
+        { header: 'CoE / Non-CoE', value: (row) => row.coeStatus },
+        { header: 'Proposed Start Date', value: (row) => row.proposedStartDate },
+        { header: 'Proposed End Date', value: (row) => row.proposedEndDate },
+        { header: 'Personal Email', value: (row) => row.personalEmail },
+        { header: 'Primary Phone', value: (row) => row.primaryPhone },
+        { header: 'Status', value: (row) => row.status },
+        { header: 'Fields With A Problem', value: (row) => row.issues.map((issue) => issue.field).join('; ') },
+        {
+          header: 'Validation Message',
+          value: (row) => row.issues.map((issue) => `${issue.field}: ${issue.message}`).join(' | '),
+        },
+      ],
+    });
+    void recordDownload('Bulk student import identified errors', outcome.rowCount, outcome.fileName);
+    toast.success('Identified errors downloaded', {
+      description: `${outcome.rowCount} error ${outcome.rowCount === 1 ? 'row' : 'rows'} in ${outcome.fileName}.`,
+    });
   }
 
   function downloadIssues(format: ExportFormat) {
@@ -242,6 +323,7 @@ export function BulkStudentImport() {
     const outcome = exportRows({
       format,
       baseFileName: `tdms-bulk-import-issues-${today()}`,
+      sheetName: 'Validation issues',
       rows: issueRows,
       columns: [
         { header: 'Source Row Number', value: (row) => row.sourceRowNumber },
@@ -255,7 +337,6 @@ export function BulkStudentImport() {
     toast.success('Issue report downloaded', {
       description: `${outcome.rowCount} issues in ${outcome.fileName}.`,
     });
-    if (outcome.notice) toast.info('XLSX export is not implemented yet', { description: outcome.notice });
   }
 
   function downloadTemplate() {
@@ -341,6 +422,11 @@ export function BulkStudentImport() {
               <div>
                 <p className="text-[12px] text-muted-foreground">Number of rows</p>
                 <p className="text-[13px] font-medium tabular">{batch.rowCount}</p>
+                {batch.rows.length !== batch.rowCount && (
+                  <p className="tabular text-[12px] text-muted-foreground">
+                    {batch.rows.length} staged now · {batch.rowCount - batch.rows.length} deleted
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -409,13 +495,17 @@ export function BulkStudentImport() {
               {blocking > 0 ? (
                 <Alert variant="warning">
                   <AlertTriangle aria-hidden="true" />
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     <AlertTitle>
                       {blocking} {blocking === 1 ? 'row has' : 'rows have'} a blocking problem
                     </AlertTitle>
                     <AlertDescription>
                       Save to Database stays unavailable until every selected staged row is Ready or excluded.
                     </AlertDescription>
+                    <Button variant="outline" size="sm" onClick={goToErrors}>
+                      <ListChecks aria-hidden="true" />
+                      Go to the {blocking} identified {blocking === 1 ? 'error' : 'errors'}
+                    </Button>
                   </div>
                 </Alert>
               ) : (
@@ -515,6 +605,15 @@ export function BulkStudentImport() {
               </TableContainer>
             </CardContent>
           </Card>
+
+          <ImportErrorReview
+            ref={errorsRef}
+            rows={errorRows}
+            canEdit={canImport}
+            busy={busy}
+            onDownload={downloadErrorRows}
+            onDelete={deleteRows}
+          />
         </>
       )}
 

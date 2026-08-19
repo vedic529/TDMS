@@ -9,11 +9,45 @@
 # Docker is optional: a developer working only on the frontend can still run
 #   cd apps/web && npm install && npm run dev
 #
-# No production database container is defined here. DATA-07 / OD-13 require the
-# final PostgreSQL schema and hosting configuration to be approved first; a
-# local PostgreSQL service can be added once the schema exists.
+# The `db` service is the LOCAL DEVELOPMENT PostgreSQL instance only. It is not
+# staging, not production, and is never connected to Supabase. Database Schema
+# v1 was approved on 10 August 2026; the schema itself is created in Step 3
+# through Alembic migrations, never by hand and never from an init script.
+#
+#   Database only     docker compose up -d db
+#   Full stack        docker compose up --build
+#
+# See docs/database/local-postgresql-development.md
 
 services:
+  db:
+    image: postgres:17-bookworm
+    container_name: tdms-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TDMS_POSTGRES_DB:-tdms_dev}
+      POSTGRES_USER: ${TDMS_POSTGRES_ADMIN_USER:-postgres}
+      # No default: Compose fails with a clear error rather than starting the
+      # database with a blank or weak password.
+      POSTGRES_PASSWORD: ${TDMS_POSTGRES_ADMIN_PASSWORD:?TDMS_POSTGRES_ADMIN_PASSWORD is not set. Copy .env.example to .env and set a local development password.}
+      # UTF-8 for a database created from scratch on this volume.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      # Bound to the loopback interface only - never 0.0.0.0.
+      - '127.0.0.1:${TDMS_POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - tdms_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U "${TDMS_POSTGRES_ADMIN_USER:-postgres}" -d "${TDMS_POSTGRES_DB:-tdms_dev}"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   api:
     build:
       context: ./apps/api
@@ -49,3 +83,9 @@ services:
       - api
     ports:
       - '${WEB_PORT:-3000}:3000'
+
+volumes:
+  # Named volume, not anonymous: the development database survives
+  # `docker compose down`. Only `docker compose down -v` destroys it.
+  tdms_postgres_data:
+    name: tdms_postgres_data

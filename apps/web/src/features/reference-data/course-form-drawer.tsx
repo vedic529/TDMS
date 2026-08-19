@@ -21,14 +21,18 @@ import { PreviewPanel } from '@/components/common/preview-panel';
 import { ValidationPanel } from '@/components/common/validation-panel';
 import { ConfirmationDialog } from '@/components/common/confirmation-dialog';
 import { ChangeSummaryDialog, buildChanges } from '@/components/common/change-summary-dialog';
-import { useReferenceData } from '@/features/shared/reference-data-context';
+import {
+  referenceApi,
+  type ApiCourseStatus,
+  type ApiQualification,
+} from '@/services/reference-api';
+import { useReferenceLookups } from './use-reference-lookups';
+import { qualificationCodeLabel } from './reference-adapters';
 import { useAuth } from '@/features/auth/auth-context';
-import { getTdmsClient } from '@/services';
 import { formatCurrency, nowIso } from '@/lib/format';
 import {
   COURSE_LEVEL_OPTIONS,
   COURSE_SECTOR_OPTIONS,
-  COURSE_STATUS_OPTIONS,
   FIELD_OF_EDUCATION_BROAD_OPTIONS,
   FIELD_OF_EDUCATION_NARROW_OPTIONS,
 } from '@/mock-data';
@@ -40,16 +44,15 @@ const EMPTY: CourseInput = {
   collegeId: '',
   campusId: '',
   courseCode: '',
-  vetCode: '',
+  qualificationCode: '',
   courseStatus: 'Active',
-  courseName: '',
+  qualificationTitle: '',
   courseLevel: '',
   fieldOfEducationBroad: '',
   fieldOfEducationNarrow: '',
   courseSector: 'VET',
   durationInWeeks: 0,
   totalCourseCost: 0,
-  location: '',
 };
 
 interface CourseFormDrawerProps {
@@ -63,10 +66,45 @@ interface CourseFormDrawerProps {
 
 /** Create and edit for Course Data (COL-07). */
 export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses, onSaved }: CourseFormDrawerProps) {
-  const { data, campusesForCollege, campusById, collegeById } = useReferenceData();
+  const { colleges, campusesForCollege, campusById, collegeById, loadCampusesFor } =
+    useReferenceLookups();
+  const [qualifications, setQualifications] = React.useState<ApiQualification[]>([]);
+  const [statuses, setStatuses] = React.useState<ApiCourseStatus[]>([]);
+
+  // Real reference values for the dependent dropdowns. COL-05: only statuses
+  // approved for new records are offered when creating.
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [q, s] = await Promise.all([
+          referenceApi.listQualifications({ activeOnly: true }),
+          referenceApi.listCourseStatuses(true),
+        ]);
+        if (!cancelled) {
+          setQualifications(q);
+          setStatuses(s);
+        }
+      } catch {
+        if (!cancelled) {
+          setQualifications([]);
+          setStatuses([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const { user } = useAuth();
 
   const [input, setInput] = React.useState<CourseInput>(EMPTY);
+
+  // COL-01: the approved campuses for the chosen college come from the API.
+  React.useEffect(() => {
+    void loadCampusesFor(input.collegeId);
+  }, [input.collegeId, loadCampusesFor]);
   const [step, setStep] = React.useState<'form' | 'preview'>('form');
   const [validation, setValidation] = React.useState<ValidationResult | null>(null);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
@@ -91,8 +129,8 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
   }
 
   function selectCampus(campusId: string) {
-    const campus = campusById(campusId);
-    setInput((current) => ({ ...current, campusId, location: campus?.campusLocation ?? current.location }));
+    // C-3: Location IS the Campus value, so choosing the campus sets it.
+    setInput((current) => ({ ...current, campusId }));
     setValidation(null);
     setStep('form');
   }
@@ -103,8 +141,15 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
       ['College', input.collegeId, 'Select the college that offers the course.'],
       ['Campus', input.campusId, 'Select an approved campus for the selected college.'],
       ['Course Code', input.courseCode, 'Enter the approved internal or source-system code for the course.'],
-      ['VET Code', input.vetCode, 'Enter the code supplied in the approved VET course source.'],
-      ['Course Name', input.courseName, 'Enter the approved course title.'],
+      // Required as a field, but "NA" is a legitimate answer: ELICOS courses
+      // have no VET Code. The user must still state which it is rather than
+      // leaving it blank, so an omission is never mistaken for "no code exists".
+      [
+        'VET Code',
+        input.qualificationCode,
+        'Enter the code from the approved VET course source, or NA if the course has none.',
+      ],
+      ['Course Name', input.qualificationTitle, 'Enter the approved course title.'],
       ['Course Level', input.courseLevel, 'Select the approved level or award type.'],
       ['Duration in Weeks', input.durationInWeeks, 'Enter the approved course duration in weeks.'],
     ];
@@ -127,14 +172,14 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
         course.id !== editing?.id &&
         course.collegeId === input.collegeId &&
         course.campusId === input.campusId &&
-        course.vetCode.trim().toUpperCase() === input.vetCode.trim().toUpperCase(),
+        course.qualificationCode.trim().toUpperCase() === input.qualificationCode.trim().toUpperCase(),
     );
     if (duplicate) {
       issues.push({
         id: 'course-duplicate',
         severity: 'blocking',
         title: 'Duplicate offering',
-        message: `${duplicate.courseCode} already stores VET Code ${duplicate.vetCode} for this college and campus. The same approved offering must not be stored more than once.`,
+        message: `${duplicate.courseCode} already stores VET Code ${duplicate.qualificationCode} for this college and campus. The same approved offering must not be stored more than once.`,
         reference: 'VET Code',
       });
     }
@@ -151,12 +196,38 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
     if (!user || !validation?.canSave) return;
     setBusy(true);
     try {
-      const client = getTdmsClient();
+      // The real API. The actor is not sent: FastAPI derives it from the
+      // verified Microsoft identity, and a body field claiming who acted would
+      // be worthless as evidence.
+      // Match on the displayed label so a code-less ELICOS qualification, shown
+      // as NA, resolves to the row the user actually chose.
+      const qualification = qualifications.find(
+        (row) =>
+          qualificationCodeLabel(row.qualification_code).toUpperCase() ===
+          input.qualificationCode.trim().toUpperCase(),
+      );
+      const statusRow = statuses.find((row) => row.label === input.courseStatus) ?? statuses[0];
+
       if (editing) {
-        await client.updateCourse(editing.id, input, { actor: user });
+        await referenceApi.updateCourse(Number(editing.id), {
+          course_code: input.courseCode,
+          course_status_id: statusRow?.id,
+          total_course_cost: input.totalCourseCost || null,
+          duration_options: input.durationInWeeks ? [input.durationInWeeks] : [],
+        });
         toast.success('Course updated', { description: `${input.courseCode} was updated.` });
       } else {
-        await client.createCourse(input, { actor: user });
+        if (!qualification) throw new Error('Select an approved qualification.');
+        if (!statusRow) throw new Error('No approved course status is configured yet.');
+        await referenceApi.createCourse({
+          college_id: Number(input.collegeId),
+          campus_id: Number(input.campusId),
+          qualification_id: qualification.id,
+          course_code: input.courseCode,
+          course_status_id: statusRow.id,
+          total_course_cost: input.totalCourseCost || null,
+          duration_options: input.durationInWeeks ? [input.durationInWeeks] : [],
+        });
         toast.success('Course added', { description: `${input.courseCode} was added to Course Data.` });
       }
       setConfirmOpen(false);
@@ -174,9 +245,9 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
   const changes = editing
     ? buildChanges(editing as unknown as Record<string, unknown>, input as unknown as Record<string, unknown>, [
         { key: 'courseCode', label: 'Course Code' },
-        { key: 'vetCode', label: 'VET Code' },
+        { key: 'qualificationCode', label: 'VET Code' },
         { key: 'courseStatus', label: 'Course Status' },
-        { key: 'courseName', label: 'Course Name' },
+        { key: 'qualificationTitle', label: 'Course Name' },
         { key: 'courseLevel', label: 'Course Level' },
         { key: 'fieldOfEducationBroad', label: 'Field of Education - Broad' },
         { key: 'fieldOfEducationNarrow', label: 'Field of Education - Narrow' },
@@ -194,9 +265,9 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
         { label: 'College', value: collegeById(input.collegeId)?.collegeFullName ?? '' },
         { label: 'Campus', value: campusById(input.campusId)?.campusName ?? '' },
         { label: 'Course Code', value: input.courseCode },
-        { label: 'VET Code', value: input.vetCode },
+        { label: 'VET Code', value: input.qualificationCode },
         { label: 'Course Status', value: input.courseStatus },
-        { label: 'Course Name', value: input.courseName },
+        { label: 'Course Name', value: input.qualificationTitle },
       ],
     },
     {
@@ -208,7 +279,7 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
         { label: 'Course Sector', value: input.courseSector },
         { label: 'Duration in Weeks', value: input.durationInWeeks ? `${input.durationInWeeks} weeks` : '' },
         { label: 'Total Course Cost', value: formatCurrency(input.totalCourseCost) },
-        { label: 'Location', value: input.location },
+        { label: 'Location', value: campusById(input.campusId)?.campusLocation ?? '' },
       ],
     },
   ];
@@ -240,7 +311,7 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
                           setValidation(null);
                           setStep('form');
                         }}
-                        options={(data?.colleges ?? []).map((college) => ({
+                        options={colleges.map((college) => ({
                           value: college.id,
                           label: college.collegeFullName,
                         }))}
@@ -270,8 +341,8 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
                     <FormField label="VET Code" htmlFor="course-vet-code" required>
                       <Input
                         id="course-vet-code"
-                        value={input.vetCode}
-                        onChange={(event) => update('vetCode', event.target.value)}
+                        value={input.qualificationCode}
+                        onChange={(event) => update('qualificationCode', event.target.value)}
                       />
                     </FormField>
                     <FormField label="Course Status" htmlFor="course-status" required>
@@ -279,15 +350,21 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
                         id="course-status"
                         value={input.courseStatus}
                         onChange={(value) => update('courseStatus', value as CourseStatus)}
-                        options={COURSE_STATUS_OPTIONS.map((status) => ({ value: status, label: status }))}
+                        // COL-05 statuses that may be chosen for a new record,
+                        // from the database. A constant here would offer values
+                        // the backend has retired, or omit ones it has approved.
+                        options={statuses.map((status) => ({
+                          value: status.label,
+                          label: status.label,
+                        }))}
                         placeholder="Select status"
                       />
                     </FormField>
                     <FormField label="Course Name" htmlFor="course-name" required>
                       <Input
                         id="course-name"
-                        value={input.courseName}
-                        onChange={(event) => update('courseName', event.target.value)}
+                        value={input.qualificationTitle}
+                        onChange={(event) => update('qualificationTitle', event.target.value)}
                       />
                     </FormField>
                   </FormGrid>
@@ -349,11 +426,16 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
                         onChange={(event) => update('totalCourseCost', Number(event.target.value))}
                       />
                     </FormField>
-                    <FormField label="Location" htmlFor="course-location">
+                    <FormField
+                      label="Location"
+                      htmlFor="course-location"
+                      generated
+                      hint="SRS 8.2: Location is the approved Campus value, so it follows the selected campus."
+                    >
                       <Input
                         id="course-location"
-                        value={input.location}
-                        onChange={(event) => update('location', event.target.value)}
+                        value={campusById(input.campusId)?.campusLocation ?? ''}
+                        readOnly
                       />
                     </FormField>
                   </FormGrid>
@@ -402,7 +484,11 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
           onOpenChange={setConfirmOpen}
           title="Update Course Record?"
           description="Check the record and the fields that will change, then confirm the update."
-          record={{ primary: editing.courseCode, secondary: editing.courseName, lines: [editing.location] }}
+          record={{
+            primary: editing.courseCode,
+            secondary: editing.qualificationTitle,
+            lines: [campusById(editing.campusId)?.campusLocation ?? ''],
+          }}
           changes={changes}
           busy={busy}
           onConfirm={save}

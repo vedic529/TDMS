@@ -60,6 +60,30 @@ yarn-error.log*
 pnpm-debug.log*
 
 # ---------------------------------------------------------------------------
+# Real operational source data
+# ---------------------------------------------------------------------------
+# The approved workbooks live in the repository so every script resolves one
+# stable path, but they are NEVER committed: they carry student, staff and
+# college records, and this repository is public.
+#
+# Only the README that explains what belongs here is tracked.
+data/source/*
+!data/source/README.md
+
+# Student files, wherever they land. These are the highest-risk artefacts in
+# the project, so the rule is by shape rather than by folder.
+*Student_List*
+*Student List*
+*Master List*
+*student list*
+
+# Archives of the working tree. `.claude/` is ignored but `.claude.zip` was not,
+# and one such archive carried .env, apps/web/.env.local, node_modules and .venv
+# — 266 MB including live database passwords. Ignore the shape, not one name.
+*.zip
+!docs/**/*.zip
+
+# ---------------------------------------------------------------------------
 # Explicitly tracked (do not ignore)
 # ---------------------------------------------------------------------------
 !.env.example

@@ -15,7 +15,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AssignmentBadge, RoleBadge } from '@/components/common/role-badge';
+import { RoleBadge } from '@/components/common/role-badge';
 import { AccountStatusBadge } from '@/components/common/status-badge';
 import { useAuth } from '@/features/auth/auth-context';
 import { getTdmsClient, resetTdmsClient } from '@/services';
@@ -159,7 +159,6 @@ export function DevAccessPreview() {
                           </span>
                           <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
                             <RoleBadge role={entry.role} />
-                            <AssignmentBadge assignment={entry.assignment} />
                             <AccountStatusBadge status={entry.accountStatus} />
                           </span>
                         </span>

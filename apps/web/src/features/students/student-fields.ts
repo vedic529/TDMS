@@ -28,6 +28,19 @@ export const studentFormSchema = z
     proposedStartDate: z.string().min(1, 'Select the proposed first date of the course.'),
     proposedEndDate: z.string().min(1, 'Select the proposed final date of the course.'),
     qualificationTitle: z.string().min(1, 'Select the qualification offered by the college and campus.'),
+    /**
+     * Approved 11 August 2026: the user selects the Group. Ten qualifications
+     * use Group 1...Group N; every other qualification uses N/A. The value
+     * depends on the chosen qualification, so it is checked by the form's
+     * cross-field rule rather than here, and again by the API.
+     */
+    group: z.string(),
+    /**
+     * OD-08 approved: staff select the approved Course Duration Option, and the
+     * field is always shown. The SRS Required column records it as Conditional,
+     * so an empty value is accepted and only an unapproved value is rejected.
+     */
+    courseDurationOption: z.string(),
     ctStudent: z.enum(['Yes', 'No']),
     personalEmail: z.string(),
     primaryPhone: z.string(),

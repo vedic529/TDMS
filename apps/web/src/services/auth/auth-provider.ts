@@ -22,4 +22,10 @@ export interface AuthProvider {
   signOut(): Promise<void>;
   /** Restores a session on page load, or null when there is none. */
   restoreSession(): Promise<AuthSession | null>;
+  /**
+   * A bearer token for the TDMS API, or null when this adapter does not issue
+   * one. `ApiTdmsClient` calls this so the Authorization header is attached in
+   * exactly one place instead of being repeated by every caller.
+   */
+  getApiAccessToken(): Promise<string | null>;
 }

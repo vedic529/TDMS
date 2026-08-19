@@ -59,7 +59,16 @@ export function LoginScreen() {
             <Alert variant="destructive" className="mt-6">
               <AlertCircle aria-hidden="true" />
               <div className="space-y-1">
-                <AlertTitle>Access denied</AlertTitle>
+                <AlertTitle>
+                  {/*
+                    An unreachable API is not a denial. Calling it "Access
+                    denied" sends the user to request access when what is
+                    actually needed is to start the backend.
+                  */}
+                  {lastFailure.reason === 'SERVICE_UNAVAILABLE'
+                    ? 'TDMS is unavailable'
+                    : 'Access denied'}
+                </AlertTitle>
                 <AlertDescription>
                   {lastFailure.userMessage}
                   <span className="mt-1 block text-[12px] opacity-80">
@@ -70,11 +79,24 @@ export function LoginScreen() {
             </Alert>
           )}
 
+          {env.authConfigurationError && (
+            <Alert variant="destructive" className="mt-6">
+              <AlertCircle aria-hidden="true" />
+              <div className="space-y-1">
+                <AlertTitle>Sign-in is not available</AlertTitle>
+                <AlertDescription>
+                  {env.authConfigurationError} Contact the TDMS administrator - this is a server
+                  configuration problem, not a problem with your account.
+                </AlertDescription>
+              </div>
+            </Alert>
+          )}
+
           <Button
             size="lg"
             className="mt-7 w-full gap-3"
             onClick={() => void handleSignIn()}
-            disabled={busy || status === 'loading'}
+            disabled={busy || status === 'loading' || !env.canSignIn}
           >
             {busy ? (
               <Loader2 className="animate-spin" aria-hidden="true" />
@@ -91,10 +113,11 @@ export function LoginScreen() {
           </p>
         </div>
 
-        {!env.isEntraConfigured && (
+        {env.authMode === 'mock' && env.canSignIn && (
           <p className="mx-auto mt-5 max-w-[24rem] text-center text-[12px] leading-relaxed text-muted-foreground">
-            The Microsoft Entra ID tenant is not configured in this environment (OD-01), so the button above uses the
-            development authentication adapter and creates a demo session. No Microsoft account is contacted.
+            The Microsoft Entra ID application registration has not been supplied for this
+            environment, so the button above uses the development authentication adapter and creates
+            a demo session. No Microsoft account is contacted. This adapter is refused in production.
           </p>
         )}
       </div>

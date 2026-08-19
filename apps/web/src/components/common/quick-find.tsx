@@ -89,7 +89,7 @@ export function QuickFind() {
           })),
           ...courses.slice(0, 4).map((course) => ({
             id: `course-${course.id}`,
-            label: `${course.courseCode} — ${course.courseName}`,
+            label: `${course.courseCode} — ${course.qualificationTitle}`,
             detail: `${course.courseLevel} · ${course.durationInWeeks} weeks`,
             area: INTERFACE_NAMES.courseData,
             href: `/reference-data?tab=course-data&search=${encodeURIComponent(course.courseCode)}`,

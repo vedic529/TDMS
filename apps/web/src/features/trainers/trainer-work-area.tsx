@@ -145,10 +145,10 @@ export function TrainerWorkArea() {
     },
     { id: 'location', header: 'Location', cell: (row) => row.location, sortValue: (row) => row.location },
     {
-      id: 'deliveryType',
+      id: 'classType',
       header: 'Delivery Type',
-      cell: (row) => <Badge variant="neutral">{row.deliveryType}</Badge>,
-      sortValue: (row) => row.deliveryType,
+      cell: (row) => <Badge variant="neutral">{row.classType}</Badge>,
+      sortValue: (row) => row.classType,
     },
     {
       id: 'workingTime',
@@ -206,7 +206,7 @@ export function TrainerWorkArea() {
                 { header: 'Location', value: (row) => row.location },
                 { header: 'Location Type', value: (row) => row.locationType },
                 { header: 'Working Time', value: (row) => row.workingTime },
-                { header: 'Delivery Type', value: (row) => row.deliveryType },
+                { header: 'Delivery Type', value: (row) => row.classType },
                 { header: 'Monday', value: (row) => row.monday },
                 { header: 'Tuesday', value: (row) => row.tuesday },
                 { header: 'Wednesday', value: (row) => row.wednesday },
@@ -284,8 +284,8 @@ export function TrainerWorkArea() {
         <FilterField label="Delivery Type" htmlFor="trainer-filter-delivery">
           <SimpleSelect
             id="trainer-filter-delivery"
-            value={filters.deliveryType ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, deliveryType: value as TrainerFilters['deliveryType'] }))}
+            value={filters.classType ?? ''}
+            onChange={(value) => setFilters((current) => ({ ...current, classType: value as TrainerFilters['classType'] }))}
             options={TRAINER_DELIVERY_TYPE_OPTIONS.map((option) => ({ value: option, label: option }))}
             placeholder="All delivery types"
           />
@@ -399,7 +399,7 @@ export function TrainerWorkArea() {
                       { label: 'Location', value: selected.location },
                       { label: 'Location Type', value: selected.locationType },
                       { label: 'Working Time', value: selected.workingTime },
-                      { label: 'Delivery Type', value: selected.deliveryType },
+                      { label: 'Delivery Type', value: selected.classType },
                     ],
                   },
                   {

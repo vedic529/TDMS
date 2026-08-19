@@ -283,7 +283,7 @@ export const MOCK_QUALIFICATION_UNIT_SEQUENCES: QualificationUnitSequence[] = MO
       qualificationTitle: offering.qualificationTitle,
       unitCode: unit.unitCode,
       unitTitle: unit.unitTitle,
-      sequenceId: index + 1,
+      deliveryOrder: index + 1,
       collegeId: offering.collegeId,
       campusId: offering.campusId,
       uocType: unit.uocType,

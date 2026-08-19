@@ -60,7 +60,6 @@ export class MockAuthProvider implements AuthProvider {
       await client.recordActivity({
         userReference: user.organisationEmail,
         accessLevel: user.role,
-        assignment: user.assignment,
         pageOrFunction: SRS_PAGE_REFERENCE.login,
         action: 'Access denied',
         recordOrBatchReference: user.id,
@@ -94,7 +93,6 @@ export class MockAuthProvider implements AuthProvider {
     await client.recordActivity({
       userReference: user.organisationEmail,
       accessLevel: user.role,
-      assignment: user.assignment,
       pageOrFunction: SRS_PAGE_REFERENCE.login,
       action: 'Sign in',
       recordOrBatchReference: user.id,
@@ -107,6 +105,15 @@ export class MockAuthProvider implements AuthProvider {
     return { ok: true, session };
   }
 
+  /**
+   * The development adapter contacts no Microsoft endpoint, so there is no
+   * bearer token. `ApiTdmsClient` sends the development identity header
+   * instead, which the API only honours outside production.
+   */
+  async getApiAccessToken(): Promise<string | null> {
+    return null;
+  }
+
   async signOut(): Promise<void> {
     const session = readPrototypeValue<AuthSession>(PROTOTYPE_STORAGE_KEYS.session);
     removePrototypeValue(PROTOTYPE_STORAGE_KEYS.session);
@@ -114,7 +121,6 @@ export class MockAuthProvider implements AuthProvider {
       await getTdmsClient().recordActivity({
         userReference: session.user.organisationEmail,
         accessLevel: session.user.role,
-        assignment: session.user.assignment,
         pageOrFunction: SRS_PAGE_REFERENCE.login,
         action: 'Sign out',
         recordOrBatchReference: session.user.id,

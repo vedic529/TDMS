@@ -1,4 +1,12 @@
-import type { TdmsUser } from '@/types/auth';
+import type {
+  AccessRequest,
+  AccountStatus,
+  DashboardOverview,
+  NotificationOutcome,
+  RequestableRole,
+  TdmsRole,
+  TdmsUser,
+} from '@/types/auth';
 import type { ActivityFilters, UserActivityRecord } from '@/types/activity';
 import type { ImportBatch, ImportResult, StagedStudentRow } from '@/types/import';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
@@ -10,12 +18,24 @@ import type { SoftDeletable, SoftDeleteMetadata } from '@/types/common';
 import { addDays, nowIso, rangesOverlap, today } from '@/lib/format';
 import { PROPOSED_RECYCLE_PERIOD_DAYS } from '@/lib/reasons';
 import { SRS_PAGE_REFERENCE } from '@/lib/interface-names';
+import {
+  ROLE_LABELS,
+  canDecideAccessRequests,
+  canManageUserRoles,
+  requestableRolesFor,
+} from '@/lib/permissions';
+import { NO_GROUP, deriveIntakeDate } from '@/lib/student-rules';
 import { createSeedDataset } from '@/mock-data';
 import { qualificationByCode } from '@/mock-data/qualifications';
 
 import type { ReferenceDataBundle, TdmsDataset } from './dataset';
 import { PROTOTYPE_STORAGE_KEYS, readPrototypeValue, writePrototypeValue } from './prototype-storage';
-import { countByStatus, validateStagedRows } from './import-validation';
+import {
+  countByStatus,
+  splitEmails,
+  validateStagedRows,
+  type ReferenceLookups,
+} from './import-validation';
 import type {
   ActionContext,
   CourseFilters,
@@ -85,8 +105,33 @@ export class MockTdmsClient implements TdmsClient {
 
   private dataset: TdmsDataset;
 
+  /**
+   * Approved reference values from PostgreSQL, when they have been loaded.
+   *
+   * Bulk import validates a student file against real colleges, campuses and
+   * offerings — never the prototype dataset. Comparing a genuine campus address
+   * against an invented one is why
+   * `132-146 Elizabeth Street, HOBART, Tasmania 7000` was reported as an
+   * unapproved campus when it is exactly what the database holds.
+   *
+   * Null until `ReferenceDataProvider` supplies it; the fallback keeps the
+   * prototype working in mock mode rather than validating against nothing.
+   */
+  private referenceLookups: ReferenceLookups | null = null;
+
   constructor() {
     this.dataset = this.load();
+  }
+
+  /** Called once real reference data has loaded. */
+  setReferenceLookups(lookups: Omit<ReferenceLookups, 'students'>): void {
+    this.referenceLookups = { ...lookups, students: this.dataset.students };
+  }
+
+  private get validationReference(): ReferenceLookups {
+    return this.referenceLookups
+      ? { ...this.referenceLookups, students: this.dataset.students }
+      : this.dataset;
   }
 
   // -- storage -------------------------------------------------------------
@@ -118,7 +163,6 @@ export class MockTdmsClient implements TdmsClient {
     return {
       userReference: actor.organisationEmail,
       accessLevel: actor.role,
-      assignment: actor.assignment,
     };
   }
 
@@ -415,6 +459,8 @@ export class MockTdmsClient implements TdmsClient {
       collegeValue: raw['College'] ?? '',
       campusValue: raw['Campus'] ?? '',
       qualificationValue: raw['Qualification'] ?? '',
+      ctStudent: raw['CT Student'] ?? '',
+      group: raw['Group'] ?? '',
       coeStatus: raw['CoE / Non-CoE'] ?? '',
       proposedStartDate: raw['Proposed Start Date'] ?? '',
       proposedEndDate: raw['Proposed End Date'] ?? '',
@@ -434,7 +480,7 @@ export class MockTdmsClient implements TdmsClient {
       uploadedByUserId: context.actor.id,
       uploadedByDisplayName: context.actor.displayName,
       rowCount: rows.length,
-      rows: validateStagedRows(rows, this.dataset),
+      rows: validateStagedRows(rows, this.validationReference),
     };
 
     this.dataset.importBatches = [batch, ...this.dataset.importBatches].slice(0, 10);
@@ -443,7 +489,10 @@ export class MockTdmsClient implements TdmsClient {
   }
 
   async revalidateImport(batch: ImportBatch): Promise<ImportBatch> {
-    const revalidated: ImportBatch = { ...batch, rows: validateStagedRows(batch.rows, this.dataset) };
+    const revalidated: ImportBatch = {
+      ...batch,
+      rows: validateStagedRows(batch.rows, this.validationReference),
+    };
     this.dataset.importBatches = this.dataset.importBatches.map((entry) =>
       entry.id === batch.id ? revalidated : entry,
     );
@@ -469,10 +518,17 @@ export class MockTdmsClient implements TdmsClient {
             )
           : 0;
 
+      // Credit Transfer decides whether three fields apply at all (approved
+      // 13 August 2026). A CT student has no group, no intake and no course
+      // duration option — and a value supplied in the file for any of them is
+      // ignored rather than accepted, so `CT=Yes, Group 4` cannot become a real
+      // group assignment by being typed into a spreadsheet.
+      const isCreditTransfer = row.ctStudent.trim().toLowerCase() === 'yes';
+
       return {
         id: `stu-${row.studentId.toLowerCase()}-${batch.batchReference}`,
-        group: '',
-        intake: '',
+        group: isCreditTransfer ? NO_GROUP : row.group.trim() || NO_GROUP,
+        intake: isCreditTransfer ? null : deriveIntakeDate(row.proposedStartDate),
         collegeId: row.resolvedCollegeId ?? '',
         campusId: row.resolvedCampusId ?? '',
         collegeEmail: college ? `${row.studentId.toLowerCase()}@${college.emailDomain}` : '',
@@ -482,12 +538,19 @@ export class MockTdmsClient implements TdmsClient {
         coeStatus: row.coeStatus === 'Non-CoE' ? 'Non-CoE' : 'CoE',
         proposedStartDate: row.proposedStartDate,
         proposedEndDate: row.proposedEndDate,
-        actualCourseDuration: Math.max(0, Math.round(durationDays / 7)),
-        courseDurationOption: definition?.durationOptions[0] ?? null,
+        // OD-08 approved: inclusive counting, and Course Duration Option is a
+        // staff selection. An import supplies no option, so it stays unset.
+        actualCourseDuration: Math.max(0, Math.round((durationDays + 1) / 7)),
+        courseDurationOption: null,
         qualificationTitle: definition?.qualificationTitle ?? '',
         qualificationCode: row.resolvedQualificationCode ?? '',
-        ctStudent: 'No',
-        personalEmail: row.personalEmail,
+        // Read from the file, never assumed. Defaulting every imported student
+        // to No would invent a Credit Transfer status for all of them.
+        ctStudent: isCreditTransfer ? 'Yes' : 'No',
+        // Several addresses are allowed and stored comma-separated, normalised
+        // to a single separator so `a@x.com,b@y.com` and `a@x.com , b@y.com`
+        // are stored the same way (approved 14 August 2026).
+        personalEmail: splitEmails(row.personalEmail).join(','),
         primaryPhone: row.primaryPhone,
         state: campus?.state ?? '',
         primaryCountry: '',
@@ -537,7 +600,7 @@ export class MockTdmsClient implements TdmsClient {
       if (!trainer.qualificationsCanTeach.includes(filters.qualificationCode!)) return false;
       if (filters.campusId && trainer.campusId !== filters.campusId) return false;
       if (filters.location && trainer.location !== filters.location) return false;
-      if (filters.deliveryType && trainer.deliveryType !== filters.deliveryType) return false;
+      if (filters.classType && trainer.classType !== filters.classType) return false;
       if (filters.status === 'active' && !trainer.isActive) return false;
       if (filters.status === 'inactive' && trainer.isActive) return false;
       if (filters.search && !includesText([trainer.trainerId, trainer.trainerName, trainer.location], filters.search)) {
@@ -640,7 +703,7 @@ export class MockTdmsClient implements TdmsClient {
       if (filters.courseStatus && course.courseStatus !== filters.courseStatus) return false;
       if (
         filters.search &&
-        !includesText([course.courseCode, course.vetCode, course.courseName, course.courseLevel], filters.search)
+        !includesText([course.courseCode, course.qualificationCode, course.qualificationTitle, course.courseLevel], filters.search)
       ) {
         return false;
       }
@@ -662,7 +725,7 @@ export class MockTdmsClient implements TdmsClient {
       action: 'Create',
       recordOrBatchReference: course.courseCode,
       result: 'Completed',
-      plainLanguageDetail: `Course ${course.courseCode} - ${course.courseName} added to reference data.`,
+      plainLanguageDetail: `Course ${course.courseCode} - ${course.qualificationTitle} added to reference data.`,
     });
     this.persist();
     return delay(course);
@@ -751,7 +814,7 @@ export class MockTdmsClient implements TdmsClient {
     });
     return delay(
       [...rows].sort(
-        (a, b) => a.qualificationCode.localeCompare(b.qualificationCode) || a.sequenceId - b.sequenceId,
+        (a, b) => a.qualificationCode.localeCompare(b.qualificationCode) || a.deliveryOrder - b.deliveryOrder,
       ),
     );
   }
@@ -772,7 +835,7 @@ export class MockTdmsClient implements TdmsClient {
       action: 'Create',
       recordOrBatchReference: record.recordId,
       result: 'Completed',
-      plainLanguageDetail: `Unit ${record.unitCode} added to ${record.qualificationCode} at sequence ${record.sequenceId}.`,
+      plainLanguageDetail: `Unit ${record.unitCode} added to ${record.qualificationCode} at sequence ${record.deliveryOrder}.`,
     });
     this.persist();
     return delay(record);
@@ -892,6 +955,257 @@ export class MockTdmsClient implements TdmsClient {
     });
     this.persist();
     return delay(updated);
+  }
+
+  // -- Access requests (Access Model v1.1) ---------------------------------
+  //
+  // The prototype mirrors the API rules so the interface behaves the same in
+  // demo mode. The API remains authoritative: these checks shape the UI, they
+  // do not secure anything.
+
+  async getMyAccessRequest(userId: string): Promise<AccessRequest | null> {
+    const pending = this.dataset.accessRequests.find(
+      (request) => request.requesterUserId === userId && request.status === 'PENDING',
+    );
+    return delay(pending ?? null);
+  }
+
+  async listAccessRequests(): Promise<AccessRequest[]> {
+    return delay(
+      [...this.dataset.accessRequests].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)),
+    );
+  }
+
+  async submitAccessRequest(
+    requestedRole: RequestableRole,
+    context: ActionContext,
+  ): Promise<{ request: AccessRequest; notification: NotificationOutcome }> {
+    const actor = context.actor;
+
+    if (!requestableRolesFor(actor.role).includes(requestedRole)) {
+      throw new Error(
+        `${ROLE_LABELS[requestedRole]} is not a role you can request from ${ROLE_LABELS[actor.role]}.`,
+      );
+    }
+    // One pending request at a time. The database enforces this with a partial
+    // unique index; here it stops the interface offering an impossible action.
+    if (this.dataset.accessRequests.some((r) => r.requesterUserId === actor.id && r.status === 'PENDING')) {
+      throw new Error(
+        'You already have a pending request. Wait for a decision, or cancel it before requesting a different role.',
+      );
+    }
+
+    const request: AccessRequest = {
+      id: nextNumber(this.dataset.accessRequests.map((r) => r.id), 'req-', 4),
+      requesterUserId: actor.id,
+      requesterDisplayName: actor.displayName,
+      requesterEmail: actor.organisationEmail,
+      roleAtRequest: actor.role,
+      requestedRole,
+      status: 'PENDING',
+      requestedAt: nowIso(),
+      decidedAt: null,
+      decidedByUserId: null,
+      decidedByEmail: null,
+    };
+    this.dataset.accessRequests = [...this.dataset.accessRequests, request];
+
+    this.logActivity({
+      ...this.actorFields(actor),
+      pageOrFunction: SRS_PAGE_REFERENCE.administration,
+      action: 'Create',
+      recordOrBatchReference: request.id,
+      result: 'Completed',
+      plainLanguageDetail: `Requested ${ROLE_LABELS[requestedRole]} access from ${ROLE_LABELS[actor.role]}.`,
+    });
+    this.persist();
+
+    return delay({
+      request,
+      // The prototype sends no email and must not claim otherwise.
+      notification: {
+        delivered: false,
+        provider: 'development',
+        detail:
+          'Recorded locally. No email was sent: Microsoft Graph Mail.Send is not configured for the approved sender.',
+      },
+    });
+  }
+
+  async cancelAccessRequest(id: string, context: ActionContext): Promise<AccessRequest> {
+    const request = this.dataset.accessRequests.find((entry) => entry.id === id);
+    if (!request) throw new Error('Access request not found.');
+    if (request.requesterUserId !== context.actor.id) {
+      throw new Error('You can only cancel your own access request.');
+    }
+    if (request.status !== 'PENDING') throw new Error('This access request has already been decided.');
+
+    // Cancelled, never deleted: request history stays available.
+    const updated: AccessRequest = {
+      ...request,
+      status: 'CANCELLED',
+      decidedAt: nowIso(),
+      decidedByUserId: context.actor.id,
+      decidedByEmail: context.actor.organisationEmail,
+    };
+    this.dataset.accessRequests = this.dataset.accessRequests.map((entry) =>
+      entry.id === id ? updated : entry,
+    );
+    this.logActivity({
+      ...this.actorFields(context.actor),
+      pageOrFunction: SRS_PAGE_REFERENCE.administration,
+      action: 'Edit',
+      recordOrBatchReference: id,
+      result: 'Cancelled by the user',
+      plainLanguageDetail: `Cancelled their own request for ${ROLE_LABELS[request.requestedRole]}.`,
+    });
+    this.persist();
+    return delay(updated);
+  }
+
+  private decideAccessRequest(
+    id: string,
+    decision: 'APPROVED' | 'DENIED',
+    context: ActionContext,
+  ): AccessRequest {
+    const request = this.dataset.accessRequests.find((entry) => entry.id === id);
+    if (!request) throw new Error('Access request not found.');
+    // The first decision closes the request; a second must not overwrite it.
+    if (request.status !== 'PENDING') throw new Error('This access request has already been decided.');
+    if (request.requesterUserId === context.actor.id) {
+      throw new Error('You cannot decide your own access request.');
+    }
+    if (!canDecideAccessRequests(context.actor)) {
+      throw new Error('Deciding an access request requires Super Admin access.');
+    }
+
+    const updated: AccessRequest = {
+      ...request,
+      status: decision,
+      decidedAt: nowIso(),
+      decidedByUserId: context.actor.id,
+      decidedByEmail: context.actor.organisationEmail,
+    };
+    this.dataset.accessRequests = this.dataset.accessRequests.map((entry) =>
+      entry.id === id ? updated : entry,
+    );
+
+    if (decision === 'APPROVED') {
+      // The role change and the closed request move together.
+      this.dataset.users = this.dataset.users.map((user) =>
+        user.id === request.requesterUserId ? { ...user, role: request.requestedRole } : user,
+      );
+    }
+
+    this.logActivity({
+      ...this.actorFields(context.actor),
+      pageOrFunction: SRS_PAGE_REFERENCE.administration,
+      action: decision === 'APPROVED' ? 'Edit' : 'Edit',
+      recordOrBatchReference: id,
+      result: 'Completed',
+      plainLanguageDetail:
+        decision === 'APPROVED'
+          ? `Approved ${request.requesterEmail}: ${ROLE_LABELS[request.roleAtRequest]} to ${ROLE_LABELS[request.requestedRole]}.`
+          : `Denied ${request.requesterEmail}: request for ${ROLE_LABELS[request.requestedRole]}. Their access level is unchanged.`,
+    });
+    this.persist();
+    return updated;
+  }
+
+  async approveAccessRequest(id: string, context: ActionContext): Promise<AccessRequest> {
+    return delay(this.decideAccessRequest(id, 'APPROVED', context));
+  }
+
+  async denyAccessRequest(id: string, context: ActionContext): Promise<AccessRequest> {
+    return delay(this.decideAccessRequest(id, 'DENIED', context));
+  }
+
+  async changeUserRole(id: string, role: TdmsRole, context: ActionContext): Promise<TdmsUser> {
+    const target = this.dataset.users.find((user) => user.id === id);
+    if (!target) throw new Error('User account not found.');
+    if (!canManageUserRoles(context.actor)) {
+      throw new Error('Changing a TDMS access level requires Super Admin access.');
+    }
+    // Two administrative lockout protections, both also enforced by the API.
+    if (target.id === context.actor.id) {
+      throw new Error('You cannot change your own access level. Ask another Super Admin to make this change.');
+    }
+    if (target.role === role) {
+      throw new Error(`${target.organisationEmail} already has ${ROLE_LABELS[role]} access.`);
+    }
+    if (target.role === 'SUPER_ADMIN' && role !== 'SUPER_ADMIN' && this.activeSuperAdminCount(target.id) === 0) {
+      throw new Error(
+        'This change would leave TDMS with no active Super Admin. Grant Super Admin to another account first.',
+      );
+    }
+
+    const updated: TdmsUser = { ...target, role };
+    this.dataset.users = this.dataset.users.map((user) => (user.id === id ? updated : user));
+    this.logActivity({
+      ...this.actorFields(context.actor),
+      pageOrFunction: SRS_PAGE_REFERENCE.administration,
+      action: 'Edit',
+      recordOrBatchReference: target.organisationEmail,
+      result: 'Completed',
+      plainLanguageDetail: `Changed ${target.organisationEmail}: ${ROLE_LABELS[target.role]} to ${ROLE_LABELS[role]}.`,
+    });
+    this.persist();
+    return delay(updated);
+  }
+
+  async changeUserAccountStatus(
+    id: string,
+    status: AccountStatus,
+    context: ActionContext,
+  ): Promise<TdmsUser> {
+    const target = this.dataset.users.find((user) => user.id === id);
+    if (!target) throw new Error('User account not found.');
+    if (!canManageUserRoles(context.actor)) {
+      throw new Error('Changing an account status requires Super Admin access.');
+    }
+    if (target.id === context.actor.id) {
+      throw new Error('You cannot change your own account status.');
+    }
+    if (target.role === 'SUPER_ADMIN' && status !== 'ACTIVE' && this.activeSuperAdminCount(target.id) === 0) {
+      throw new Error(
+        'This change would leave TDMS with no active Super Admin. Grant Super Admin to another account first.',
+      );
+    }
+
+    const updated: TdmsUser = { ...target, accountStatus: status };
+    this.dataset.users = this.dataset.users.map((user) => (user.id === id ? updated : user));
+    this.logActivity({
+      ...this.actorFields(context.actor),
+      pageOrFunction: SRS_PAGE_REFERENCE.administration,
+      action: 'Edit',
+      recordOrBatchReference: target.organisationEmail,
+      result: 'Completed',
+      plainLanguageDetail: `Changed ${target.organisationEmail}: ${target.accountStatus} to ${status}.`,
+    });
+    this.persist();
+    return delay(updated);
+  }
+
+  /** Active Super Admins, optionally ignoring one account being changed. */
+  private activeSuperAdminCount(excludingUserId?: string): number {
+    return this.dataset.users.filter(
+      (user) =>
+        user.role === 'SUPER_ADMIN' && user.accountStatus === 'ACTIVE' && user.id !== excludingUserId,
+    ).length;
+  }
+
+  async getDashboardOverview(): Promise<DashboardOverview> {
+    const users = this.dataset.users;
+    const count = (role: TdmsRole) => users.filter((user) => user.role === role).length;
+    return delay({
+      pendingAccessRequests: this.dataset.accessRequests.filter((r) => r.status === 'PENDING').length,
+      activeUsers: users.filter((user) => user.accountStatus === 'ACTIVE').length,
+      viewerCount: count('VIEWER'),
+      dataEditorCount: count('DATA_EDITOR'),
+      adminCount: count('ADMIN'),
+      superAdminCount: count('SUPER_ADMIN'),
+      inactiveOrDisabledUsers: users.filter((user) => user.accountStatus !== 'ACTIVE').length,
+    });
   }
 
   async listActivityRecords(filters: ActivityFilters): Promise<UserActivityRecord[]> {

@@ -1,6 +1,6 @@
 import type { DayTimeSlot, TimetableSession } from '@/types/timetable';
 import { MOCK_CAMPUSES } from './colleges';
-import { MOCK_FACILITIES } from './facilities';
+import { MOCK_FACILITIES, MSCRIS_CLASS_NAME } from './facilities';
 import { MOCK_TRAINERS } from './trainers';
 import { qualificationByCode } from './qualifications';
 import { anchorDate, anchorDateTime } from './anchor';
@@ -182,7 +182,7 @@ function buildSession(seed: GroupSeed, unitIndex: number): TimetableSession | nu
       ? trainerForQualification(seed.qualificationCode, seed.campusId, unitIndex + 1)
       : '',
 
-    mscrisClassName: unitIndex % 2 === 0 ? 'Virtual Classroom' : '',
+    mscrisClassName: unitIndex % 2 === 0 ? MSCRIS_CLASS_NAME : '',
     mscrisDaysAndTimes: unitIndex % 2 === 0 ? MSCRIS_SLOT_PATTERNS[unitIndex % MSCRIS_SLOT_PATTERNS.length] : [],
     mscrisTrainerId:
       unitIndex % 2 === 0 ? trainerForQualification(seed.qualificationCode, seed.campusId, unitIndex + 2) : '',

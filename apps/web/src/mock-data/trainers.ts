@@ -9,7 +9,7 @@ interface TrainerSeed {
   location: string;
   locationType: TrainerRecord['locationType'];
   workingTime: string;
-  deliveryType: TrainerRecord['deliveryType'];
+  classType: TrainerRecord['classType'];
   weekdays: [
     TrainerRecord['monday'],
     TrainerRecord['tuesday'],
@@ -34,7 +34,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Hobart',
     locationType: 'Campus',
     workingTime: '09:00 - 17:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [P, P, P, V, N],
     qualifications: ['BSB60420', 'BSB50420'],
   },
@@ -46,7 +46,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Hobart',
     locationType: 'Campus',
     workingTime: '09:00 - 17:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [V, P, P, P, P],
     qualifications: ['BSB60420', 'BSB80120'],
   },
@@ -58,7 +58,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Melbourne',
     locationType: 'Campus',
     workingTime: '08:30 - 16:30',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [P, P, N, P, P],
     qualifications: ['BSB50420', 'BSB50820'],
   },
@@ -70,7 +70,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Melbourne',
     locationType: 'Kitchen',
     workingTime: '07:00 - 15:00',
-    deliveryType: 'Practical',
+    classType: 'Practical',
     weekdays: [P, P, P, N, N],
     qualifications: ['SIT30821', 'SIT50422'],
   },
@@ -82,7 +82,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Melbourne',
     locationType: 'Campus',
     workingTime: '10:00 - 18:00',
-    deliveryType: 'Theory and Practical',
+    classType: 'Theory and Practical',
     weekdays: [N, P, P, P, P],
     qualifications: ['SIT50422', 'CHC50125'],
   },
@@ -94,7 +94,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Brisbane',
     locationType: 'Campus',
     workingTime: '09:00 - 17:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [P, P, P, P, N],
     qualifications: ['BSB50420', 'BSB80120', 'CHC33021'],
   },
@@ -106,7 +106,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Sydney',
     locationType: 'Campus',
     workingTime: '09:00 - 17:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [P, V, P, P, V],
     qualifications: ['BSB50420', 'BSB60420', 'BSB50820'],
   },
@@ -118,7 +118,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Sydney',
     locationType: 'Virtual',
     workingTime: '13:00 - 21:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [V, V, V, V, N],
     qualifications: ['CHC50125', 'CHC33021'],
   },
@@ -130,7 +130,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Adelaide',
     locationType: 'Kitchen',
     workingTime: '07:30 - 15:30',
-    deliveryType: 'Practical',
+    classType: 'Practical',
     weekdays: [P, P, N, P, P],
     qualifications: ['SIT30821', 'SIT50422'],
   },
@@ -142,7 +142,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Perth',
     locationType: 'Workshop',
     workingTime: '08:00 - 16:00',
-    deliveryType: 'Theory and Practical',
+    classType: 'Theory and Practical',
     weekdays: [P, P, P, P, P],
     qualifications: ['AUR30620', 'BSB50820'],
   },
@@ -154,7 +154,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Melbourne',
     locationType: 'Campus',
     workingTime: '09:00 - 17:00',
-    deliveryType: 'Theory',
+    classType: 'Theory',
     weekdays: [P, P, V, N, P],
     qualifications: ['BSB50420', 'BSB60420', 'CHC33021'],
   },
@@ -166,7 +166,7 @@ const TRAINER_SEEDS: TrainerSeed[] = [
     location: 'Hobart',
     locationType: 'Kitchen',
     workingTime: '07:00 - 15:00',
-    deliveryType: 'Practical',
+    classType: 'Practical',
     weekdays: [P, P, P, N, N],
     qualifications: ['FBP30321', 'SIT30821'],
     // TRN-04: an inactive trainer stays visible for historical records but must
@@ -185,7 +185,7 @@ export const MOCK_TRAINERS: TrainerRecord[] = TRAINER_SEEDS.map((seed, index) =>
   location: seed.location,
   locationType: seed.locationType,
   workingTime: seed.workingTime,
-  deliveryType: seed.deliveryType,
+  classType: seed.classType,
   monday: seed.weekdays[0],
   tuesday: seed.weekdays[1],
   wednesday: seed.weekdays[2],
@@ -211,7 +211,7 @@ export const WORKING_TIME_OPTIONS = [
 
 export const LOCATION_TYPE_OPTIONS: TrainerRecord['locationType'][] = ['Campus', 'Kitchen', 'Workshop', 'Virtual'];
 
-export const TRAINER_DELIVERY_TYPE_OPTIONS: TrainerRecord['deliveryType'][] = [
+export const TRAINER_DELIVERY_TYPE_OPTIONS: TrainerRecord['classType'][] = [
   'Theory',
   'Practical',
   'Theory and Practical',

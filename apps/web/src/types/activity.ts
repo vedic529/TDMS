@@ -1,5 +1,5 @@
 import type { IsoDateTime, ReasonCode } from './common';
-import type { DataEditorAssignment, TdmsRole } from './auth';
+import type { MicrosoftSignInResult, TdmsAccessDecision, TdmsRole } from './auth';
 
 /** SRS 4.5 / LOG-01 - actions that must create a user activity record. */
 export type ActivityAction =
@@ -36,7 +36,6 @@ export interface UserActivityRecord {
   /** Verified TDMS user, or "Unmatched user" for a failed sign-in. */
   userReference: string;
   accessLevel: TdmsRole | 'Unknown';
-  assignment: DataEditorAssignment | null;
   /** Approved interface name, e.g. "Page 2B - Bulk Student Import". */
   pageOrFunction: string;
   action: ActivityAction;
@@ -44,6 +43,15 @@ export interface UserActivityRecord {
   reason?: ReasonCode;
   reasonDetail?: string;
   result: ActivityResult;
+  /**
+   * C-6 / LOG-02: SRS 4.5 records the Microsoft sign-in result and the TDMS
+   * access decision as fields *separate* from Result. They answer different
+   * questions - "did Microsoft verify them?" and "did TDMS let them in?" - and
+   * a blocked account is a denial reason, not a failed sign-in. Present only on
+   * sign-in and access rows.
+   */
+  microsoftSignInResult?: MicrosoftSignInResult;
+  tdmsAccessDecision?: TdmsAccessDecision;
   /** Correlation ID, Microsoft error code or internal error reference. */
   technicalReference?: string;
   plainLanguageDetail: string;

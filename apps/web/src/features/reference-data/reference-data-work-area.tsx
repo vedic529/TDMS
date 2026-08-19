@@ -10,25 +10,27 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PageHeader } from '@/components/common/page-header';
 import { FilterBar, FilterField } from '@/components/common/filter-bar';
-import { DependentSelect, SimpleSelect } from '@/components/common/dependent-select';
+import { SimpleSelect } from '@/components/common/dependent-select';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
-import { EmptyState, PendingRuleNotice, ReadOnlyNotice } from '@/components/common/states';
+import { EmptyState, ErrorState, PendingRuleNotice, ReadOnlyNotice } from '@/components/common/states';
 import { CourseStatusBadge } from '@/components/common/status-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { DeleteConfirmationDialog } from '@/components/common/delete-confirmation-dialog';
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { CourseFormDrawer } from './course-form-drawer';
 import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
-import { useReferenceData } from '@/features/shared/reference-data-context';
+import { useReferenceLookups } from './use-reference-lookups';
+import { useCascadingFilters } from './use-cascading-filters';
+import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useAuth } from '@/features/auth/auth-context';
-import { getTdmsClient } from '@/services';
+import { ReferenceApiError, referenceApi } from '@/services/reference-api';
+import type { SelectOption } from '@/types/common';
+import { toCourseRecord, toQualificationUnit } from './reference-adapters';
 import { INTERFACE_NAMES, SRS_PAGE_REFERENCE } from '@/lib/interface-names';
 import { readOnlyReason } from '@/lib/permissions';
 import { formatCurrency, today } from '@/lib/format';
-import { COURSE_STATUS_OPTIONS } from '@/mock-data';
 import type { ReasonCode } from '@/types/common';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
-import type { CourseFilters, QualificationUnitFilters } from '@/services/tdms-client';
 
 type TabValue = 'course-data' | 'qualification-unit-sequence';
 
@@ -81,9 +83,11 @@ export function ReferenceDataWorkArea() {
 
 function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
   const { user, permissions } = useAuth();
-  const { data, campusesForCollege, collegeById, campusById } = useReferenceData();
+  const { collegeById, campusById } = useReferenceLookups();
+  const cascade = useCascadingFilters();
 
-  const [filters, setFilters] = React.useState<CourseFilters>({ search: initialSearch });
+  const [search, setSearch] = React.useState(initialSearch);
+  const [courseStatus, setCourseStatus] = React.useState('');
   const [rows, setRows] = React.useState<CourseRecord[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [formOpen, setFormOpen] = React.useState(false);
@@ -94,14 +98,75 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
   const [deletedRows, setDeletedRows] = React.useState<CourseRecord[]>([]);
   const [recycleLoading, setRecycleLoading] = React.useState(false);
 
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+
+  /**
+   * Filter options come from `course_statuses`, not a constant.
+   *
+   * COL-05 is an open vocabulary, so a hard-coded list would go stale the moment
+   * an approved status is added — and would offer the user a filter that matches
+   * nothing. The value sent back is the status *code*; the label is what shows.
+   */
+  const [courseStatusOptions, setCourseStatusOptions] = React.useState<SelectOption[]>([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const statuses = await referenceApi.listCourseStatuses();
+        if (!cancelled) {
+          setCourseStatusOptions(
+            statuses.map((status) => ({ value: status.code, label: status.label })),
+          );
+        }
+      } catch {
+        if (!cancelled) setCourseStatusOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Real data only. There is deliberately no mock fallback: an empty database
+   * must render an empty table, and a failure must say so rather than quietly
+   * showing demo records that look real.
+   */
   const load = React.useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
+    // Never leave rows from the previous scope on screen while the new ones load.
+    setRows([]);
     try {
-      setRows(await getTdmsClient().listCourses(filters));
+      const courses = await referenceApi.listCourses({
+        search: search || undefined,
+        // Scope is enforced in SQL over real offerings, so the table can never
+        // show a row outside the current College/Campus/Qualification selection.
+        collegeIds: cascade.scope.collegeIds,
+        campusIds: cascade.scope.campusIds,
+        qualificationIds: cascade.scope.qualificationIds,
+        // Filtered against the stored status, so the filter and the badge can
+        // never disagree about what a record's status is.
+        courseStatusCode: courseStatus || undefined,
+      });
+      setRows(courses.map(toCourseRecord));
+    } catch (error) {
+      setRows([]);
+      setLoadError(
+        error instanceof ReferenceApiError
+          ? error.message
+          : 'Course records could not be loaded. Refresh the page or contact the TDMS administrator.',
+      );
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [
+    cascade.scope.collegeIds,
+    cascade.scope.campusIds,
+    cascade.scope.qualificationIds,
+    courseStatus,
+    search,
+  ]);
 
   React.useEffect(() => {
     void load();
@@ -110,13 +175,23 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
   const loadDeleted = React.useCallback(async () => {
     setRecycleLoading(true);
     try {
-      setDeletedRows(await getTdmsClient().listDeletedCourses());
+      const deleted = await referenceApi.listCourses({ includeDeleted: true });
+      setDeletedRows(deleted.map(toCourseRecord));
+    } catch {
+      setDeletedRows([]);
     } finally {
       setRecycleLoading(false);
     }
   }, []);
 
-  const canMaintain = permissions.maintainCourseData;
+  const canMaintain = permissions.maintainReferenceData;
+  const hasCourseFilters = Boolean(
+    search ||
+      courseStatus ||
+      cascade.filters.collegeIds.length ||
+      cascade.filters.campusIds.length ||
+      cascade.filters.qualificationIds.length,
+  );
 
   const columns: DataTableColumn<CourseRecord>[] = [
     {
@@ -125,7 +200,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       cell: (row) => <span className="font-medium text-foreground">{row.courseCode}</span>,
       sortValue: (row) => row.courseCode,
     },
-    { id: 'vetCode', header: 'VET Code', cell: (row) => row.vetCode, sortValue: (row) => row.vetCode },
+    { id: 'qualificationCode', header: 'VET Code', cell: (row) => row.qualificationCode, sortValue: (row) => row.qualificationCode },
     {
       id: 'courseStatus',
       header: 'Course Status',
@@ -133,14 +208,14 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       sortValue: (row) => row.courseStatus,
     },
     {
-      id: 'courseName',
+      id: 'qualificationTitle',
       header: 'Course Name',
       cell: (row) => (
-        <span className="block max-w-80 truncate" title={row.courseName}>
-          {row.courseName}
+        <span className="block max-w-80 truncate" title={row.qualificationTitle}>
+          {row.qualificationTitle}
         </span>
       ),
-      sortValue: (row) => row.courseName,
+      sortValue: (row) => row.qualificationTitle,
     },
     { id: 'courseLevel', header: 'Course Level', cell: (row) => row.courseLevel, sortValue: (row) => row.courseLevel },
     {
@@ -179,11 +254,16 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
     {
       id: 'location',
       header: 'Location',
-      cell: (row) => (
-        <span className="block max-w-72 truncate" title={row.location}>
-          {row.location}
-        </span>
-      ),
+      // C-3: SRS 8.2 - Location represents the Campus value, so it is derived
+      // from the approved campus rather than stored as free text.
+      cell: (row) => {
+        const location = campusById(row.campusId)?.campusLocation ?? '';
+        return (
+          <span className="block max-w-72 truncate" title={location}>
+            {location}
+          </span>
+        );
+      },
     },
   ];
 
@@ -191,7 +271,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
     if (!deleting || !user) return;
     setBusy(true);
     try {
-      await getTdmsClient().deleteCourse(deleting.id, { reason, reasonDetail }, { actor: user });
+      await referenceApi.deleteCourse(Number(deleting.id), { reason_detail: reasonDetail ?? reason });
       toast.success('Course moved to the recycle area', { description: `${deleting.courseCode} was removed from active use.` });
       setDeleting(null);
       await load();
@@ -205,7 +285,11 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       {!canMaintain && <ReadOnlyNotice message={readOnlyReason(user, INTERFACE_NAMES.courseData)} />}
 
       <FilterBar
-        onClear={() => setFilters({})}
+        onClear={() => {
+          cascade.clear();
+          setSearch('');
+          setCourseStatus('');
+        }}
         trailing={
           <>
             <ExportMenu
@@ -214,16 +298,16 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
               pageReference={SRS_PAGE_REFERENCE.courseData}
               columns={[
                 { header: 'Course Code', value: (row) => row.courseCode },
-                { header: 'VET Code', value: (row) => row.vetCode },
+                { header: 'VET Code', value: (row) => row.qualificationCode },
                 { header: 'Course Status', value: (row) => row.courseStatus },
-                { header: 'Course Name', value: (row) => row.courseName },
+                { header: 'Course Name', value: (row) => row.qualificationTitle },
                 { header: 'Course Level', value: (row) => row.courseLevel },
                 { header: 'Field of Education - Broad', value: (row) => row.fieldOfEducationBroad },
                 { header: 'Field of Education - Narrow', value: (row) => row.fieldOfEducationNarrow },
                 { header: 'Course Sector', value: (row) => row.courseSector },
                 { header: 'Duration in Weeks', value: (row) => row.durationInWeeks },
                 { header: 'Total Course Cost', value: (row) => row.totalCourseCost },
-                { header: 'Location', value: (row) => row.location },
+                { header: 'Location', value: (row) => campusById(row.campusId)?.campusLocation ?? '' },
                 { header: 'College', value: (row) => collegeById(row.collegeId)?.collegeFullName ?? '' },
                 { header: 'Campus', value: (row) => campusById(row.campusId)?.campusName ?? '' },
               ]}
@@ -257,41 +341,52 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         }
       >
         <FilterField label="College" htmlFor="course-filter-college">
-          <DependentSelect
+          <MultiSelectFilter
             id="course-filter-college"
-            value={filters.collegeId ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, collegeId: value, campusId: '' }))}
-            options={(data?.colleges ?? []).map((college) => ({ value: college.id, label: college.collegeFullName }))}
-            placeholder="All colleges"
+            value={cascade.filters.collegeIds}
+            onChange={cascade.setColleges}
+            options={cascade.collegeOptions}
+            allLabel="All Colleges"
+            noun="College"
           />
         </FilterField>
         <FilterField label="Campus" htmlFor="course-filter-campus">
-          <DependentSelect
+          <MultiSelectFilter
             id="course-filter-campus"
-            value={filters.campusId ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, campusId: value }))}
-            options={campusesForCollege(filters.collegeId).map((campus) => ({
-              value: campus.id,
-              label: campus.campusName,
-            }))}
-            placeholder="All campuses"
-            requires={filters.collegeId ? undefined : 'a college'}
+            value={cascade.filters.campusIds}
+            onChange={cascade.setCampuses}
+            options={cascade.campusOptions}
+            allLabel="All Campuses"
+            noun="Campus"
+            loading={cascade.loadingCampuses}
+          />
+        </FilterField>
+        <FilterField label="Qualification" htmlFor="course-filter-qualification">
+          <MultiSelectFilter
+            id="course-filter-qualification"
+            value={cascade.filters.qualificationIds}
+            onChange={cascade.setQualifications}
+            options={cascade.qualificationOptions}
+            allLabel="All Qualifications"
+            noun="Qualification"
+            loading={cascade.loadingQualifications}
+            emptyMessage="No qualifications are offered for the selected College and Campus."
           />
         </FilterField>
         <FilterField label="Course Status" htmlFor="course-filter-status">
           <SimpleSelect
             id="course-filter-status"
-            value={filters.courseStatus ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, courseStatus: value }))}
-            options={COURSE_STATUS_OPTIONS.map((status) => ({ value: status, label: status }))}
+            value={courseStatus}
+            onChange={setCourseStatus}
+            options={courseStatusOptions}
             placeholder="All statuses"
           />
         </FilterField>
         <FilterField label="Search" htmlFor="course-filter-search">
           <Input
             id="course-filter-search"
-            value={filters.search ?? ''}
-            onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
             placeholder="Course code or name"
           />
         </FilterField>
@@ -306,11 +401,25 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         loadingLabel="Loading course data…"
         initialSort={{ columnId: 'courseCode', direction: 'asc' }}
         empty={
-          <EmptyState
-            title="No course matches the selected filters."
-            description="Change the college, campus or status filter to see more records."
-            icon={BookOpen}
-          />
+          loadError ? (
+            <ErrorState title="Course records could not be loaded" description={loadError} />
+          ) : hasCourseFilters ? (
+            <EmptyState
+              title="No course matches the selected filters."
+              description="Change the college, campus or search filter to see more records."
+              icon={BookOpen}
+            />
+          ) : (
+            <EmptyState
+              title="No course records have been added yet."
+              description={
+                canMaintain
+                  ? 'Select Add Course Record to enter the first approved course.'
+                  : 'No approved course records are currently available.'
+              }
+              icon={BookOpen}
+            />
+          )
         }
         rowActions={
           canMaintain
@@ -361,8 +470,11 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
           busy={busy}
           record={{
             primary: deleting.courseCode,
-            secondary: deleting.courseName,
-            lines: [`Current status: ${deleting.courseStatus}`, deleting.location],
+            secondary: deleting.qualificationTitle,
+            lines: [
+              `Current status: ${deleting.courseStatus}`,
+              campusById(deleting.campusId)?.campusLocation ?? '',
+            ],
           }}
           onConfirm={confirmDelete}
         />
@@ -380,12 +492,16 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         canRestore={canMaintain}
         columns={[
           { id: 'courseCode', header: 'Course Code', cell: (row) => row.courseCode, sortValue: (row) => row.courseCode },
-          { id: 'courseName', header: 'Course Name', cell: (row) => row.courseName },
+          { id: 'qualificationTitle', header: 'Course Name', cell: (row) => row.qualificationTitle },
         ]}
-        describe={(row) => ({ primary: row.courseCode, secondary: row.courseName, lines: [row.location] })}
+        describe={(row) => ({
+          primary: row.courseCode,
+          secondary: row.qualificationTitle,
+          lines: [campusById(row.campusId)?.campusLocation ?? ''],
+        })}
         onRestore={async (row, reason, reasonDetail) => {
           if (!user) return;
-          await getTdmsClient().restoreCourse(row.id, { reason, reasonDetail }, { actor: user });
+          await referenceApi.restoreCourse(Number(row.id), { reason_detail: reasonDetail ?? reason });
           toast.success('Course restored', { description: `${row.courseCode} has been returned to active use.` });
           await Promise.all([load(), loadDeleted()]);
         }}
@@ -398,9 +514,9 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
 
 function QualificationUnitPanel() {
   const { user, permissions } = useAuth();
-  const { data, campusesForCollege, offeringsFor } = useReferenceData();
+  const cascade = useCascadingFilters();
 
-  const [filters, setFilters] = React.useState<QualificationUnitFilters>({});
+  const [search, setSearch] = React.useState('');
   const [rows, setRows] = React.useState<QualificationUnitSequence[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [formOpen, setFormOpen] = React.useState(false);
@@ -413,12 +529,24 @@ function QualificationUnitPanel() {
 
   const load = React.useCallback(async () => {
     setLoading(true);
+    // Clear first: a table still showing AIBT's BSB50420 under a heading that
+    // now says HJ is worse than an empty table, because it looks like an answer.
+    setRows([]);
     try {
-      setRows(await getTdmsClient().listQualificationUnitSequences(filters));
+      const sequence = await referenceApi.listQualificationUnits({
+        // Sent to the API rather than filtered here: the scope is a relational
+        // question about which qualifications are offered where, and the browser
+        // does not hold the offerings to answer it.
+        collegeIds: cascade.scope.collegeIds,
+        campusIds: cascade.scope.campusIds,
+        qualificationIds: cascade.scope.qualificationIds,
+        search: search || undefined,
+      });
+      setRows(sequence.map((row) => toQualificationUnit(row)));
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [cascade.scope.collegeIds, cascade.scope.campusIds, cascade.scope.qualificationIds, search]);
 
   React.useEffect(() => {
     void load();
@@ -427,14 +555,39 @@ function QualificationUnitPanel() {
   const loadDeleted = React.useCallback(async () => {
     setRecycleLoading(true);
     try {
-      setDeletedRows(await getTdmsClient().listDeletedQualificationUnits());
+      const deleted = await referenceApi.listQualificationUnits({ includeDeleted: true });
+      setDeletedRows(deleted.map((row) => toQualificationUnit(row)));
     } finally {
       setRecycleLoading(false);
     }
   }, []);
 
-  const canMaintain = permissions.maintainQualificationUnitData;
-  const offerings = offeringsFor(filters.collegeId, filters.campusId);
+  const canMaintain = permissions.maintainReferenceData;
+
+
+  /**
+   * Which OD-07 message applies to what the user is currently looking at.
+   *
+   * Membership and order are different things: Qualification Data establishes
+   * which units belong to a qualification; an approved rolling timetable
+   * establishes the order they run in. Only the second can be pending, and only
+   * for some qualifications — so a page-wide banner was wrong in both
+   * directions, claiming BSB50420's sequence was unapproved while saying
+   * nothing specific about the ones that genuinely are.
+   */
+  const selectedQualification = React.useMemo(() => {
+    if (cascade.filters.qualificationIds.length !== 1) return '';
+    const option = cascade.qualificationOptions.find(
+      (o) => o.value === cascade.filters.qualificationIds[0],
+    );
+    return option ? option.label.split(' — ')[0] : '';
+  }, [cascade.filters.qualificationIds, cascade.qualificationOptions]);
+  const sequenceState: 'unfiltered' | 'approved' | 'pending' = !selectedQualification
+    ? 'unfiltered'
+    : !loading && rows.length === 0
+      ? 'pending'
+      : 'approved';
+
 
   const columns: DataTableColumn<QualificationUnitSequence>[] = [
     { id: 'recordId', header: 'Record ID', cell: (row) => row.recordId, sortValue: (row) => row.recordId },
@@ -464,10 +617,10 @@ function QualificationUnitPanel() {
       ),
     },
     {
-      id: 'sequenceId',
+      id: 'deliveryOrder',
       header: 'Sequence ID',
-      cell: (row) => row.sequenceId,
-      sortValue: (row) => row.sequenceId,
+      cell: (row) => row.deliveryOrder,
+      sortValue: (row) => row.deliveryOrder,
       align: 'right',
     },
   ];
@@ -476,7 +629,7 @@ function QualificationUnitPanel() {
     if (!deleting || !user) return;
     setBusy(true);
     try {
-      await getTdmsClient().deleteQualificationUnit(deleting.id, { reason, reasonDetail }, { actor: user });
+      await referenceApi.deleteQualificationUnit(Number(deleting.id), { reason_detail: reasonDetail ?? reason });
       toast.success('Record moved to the recycle area', { description: `${deleting.recordId} was removed from active use.` });
       setDeleting(null);
       await load();
@@ -489,13 +642,39 @@ function QualificationUnitPanel() {
     <div className="space-y-5">
       {!canMaintain && <ReadOnlyNotice message={readOnlyReason(user, INTERFACE_NAMES.qualificationUnitSequence)} />}
 
-      <PendingRuleNotice
-        decisionId="OD-07"
-        message="Sequence IDs are used by timetable generation to place units in the approved teaching order. The break placement rules for 26, 52, 78 and 104-week courses must be approved before automatic generation is released (TT-11)."
-      />
+      {/*
+        OD-07 is shown for the qualification actually being looked at, not
+        across the whole page.
+
+        A blanket banner said "sequence is pending" even for a qualification
+        whose delivery order comes from an approved rolling timetable, and said
+        nothing more specific for one where it genuinely is missing. Both
+        readings were wrong. The notice now names the situation in front of the
+        user; TT-11 break placement remains unapproved either way and is stated
+        separately.
+      */}
+      {sequenceState === 'pending' ? (
+        <PendingRuleNotice
+          decisionId="OD-07"
+          message={`No approved delivery sequence has been supplied for ${selectedQualification}. Its unit membership comes from Qualification Data; the teaching order comes from an approved rolling timetable, which this qualification does not yet have. Break placement for 26, 52, 78 and 104-week courses is also still awaiting approval (TT-11).`}
+        />
+      ) : sequenceState === 'approved' ? (
+        <PendingRuleNotice
+          decisionId="TT-11"
+          message={`The delivery sequence shown for ${selectedQualification} comes from its approved rolling timetable. Break placement rules for 26, 52, 78 and 104-week courses are still awaiting approval before automatic generation is released.`}
+        />
+      ) : (
+        <PendingRuleNotice
+          decisionId="OD-07"
+          message="A delivery sequence is stored only for qualifications with an approved rolling timetable; select a qualification to see whether its order has been supplied. Break placement for 26, 52, 78 and 104-week courses is still awaiting approval before automatic generation is released (TT-11)."
+        />
+      )}
 
       <FilterBar
-        onClear={() => setFilters({})}
+        onClear={() => {
+          cascade.clear();
+          setSearch('');
+        }}
         trailing={
           <>
             <ExportMenu
@@ -508,7 +687,7 @@ function QualificationUnitPanel() {
                 { header: 'Qualification Title', value: (row) => row.qualificationTitle },
                 { header: 'Unit Code', value: (row) => row.unitCode },
                 { header: 'Unit Title', value: (row) => row.unitTitle },
-                { header: 'Sequence ID', value: (row) => row.sequenceId },
+                { header: 'Sequence ID', value: (row) => row.deliveryOrder },
                 { header: 'UoC Type', value: (row) => row.uocType },
               ]}
             />
@@ -541,50 +720,43 @@ function QualificationUnitPanel() {
         }
       >
         <FilterField label="College" htmlFor="qus-filter-college">
-          <DependentSelect
+          <MultiSelectFilter
             id="qus-filter-college"
-            value={filters.collegeId ?? ''}
-            onChange={(value) =>
-              setFilters((current) => ({ ...current, collegeId: value, campusId: '', qualificationCode: '' }))
-            }
-            options={(data?.colleges ?? []).map((college) => ({ value: college.id, label: college.collegeFullName }))}
-            placeholder="All colleges"
+            value={cascade.filters.collegeIds}
+            onChange={cascade.setColleges}
+            options={cascade.collegeOptions}
+            allLabel="All Colleges"
+            noun="College"
           />
         </FilterField>
         <FilterField label="Campus" htmlFor="qus-filter-campus">
-          <DependentSelect
+          <MultiSelectFilter
             id="qus-filter-campus"
-            value={filters.campusId ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, campusId: value, qualificationCode: '' }))}
-            options={campusesForCollege(filters.collegeId).map((campus) => ({
-              value: campus.id,
-              label: campus.campusName,
-            }))}
-            placeholder="All campuses"
-            requires={filters.collegeId ? undefined : 'a college'}
+            value={cascade.filters.campusIds}
+            onChange={cascade.setCampuses}
+            options={cascade.campusOptions}
+            allLabel="All Campuses"
+            noun="Campus"
+            loading={cascade.loadingCampuses}
           />
         </FilterField>
         <FilterField label="Qualification" htmlFor="qus-filter-qualification">
-          <SimpleSelect
+          <MultiSelectFilter
             id="qus-filter-qualification"
-            value={filters.qualificationCode ?? ''}
-            onChange={(value) => setFilters((current) => ({ ...current, qualificationCode: value }))}
-            options={Array.from(
-              new Map(
-                (offerings.length > 0 ? offerings : (data?.qualificationOfferings ?? [])).map((entry) => [
-                  entry.qualificationCode,
-                  { value: entry.qualificationCode, label: `${entry.qualificationCode} — ${entry.qualificationTitle}` },
-                ]),
-              ).values(),
-            )}
-            placeholder="All qualifications"
+            value={cascade.filters.qualificationIds}
+            onChange={cascade.setQualifications}
+            options={cascade.qualificationOptions}
+            allLabel="All Qualifications"
+            noun="Qualification"
+            loading={cascade.loadingQualifications}
+            emptyMessage="No qualifications are offered for the selected College and Campus."
           />
         </FilterField>
         <FilterField label="Search" htmlFor="qus-filter-search">
           <Input
             id="qus-filter-search"
-            value={filters.search ?? ''}
-            onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
             placeholder="Unit code or title"
           />
         </FilterField>
@@ -599,11 +771,38 @@ function QualificationUnitPanel() {
         loadingLabel="Loading qualification and unit sequence data…"
         pageSize={20}
         empty={
-          <EmptyState
-            title="No qualification and unit sequence record matches the selected filters."
-            description="Change the college, campus or qualification filter to see more records."
-            icon={GraduationCap}
-          />
+          cascade.qualificationOptions.length === 0 ? (
+            <EmptyState
+              title="No qualifications are offered for the selected College and Campus."
+              description="Choose a different College or Campus to see the qualifications delivered there."
+              icon={GraduationCap}
+            />
+          ) : selectedQualification ? (
+            // The qualification is genuinely offered; its unit data has simply
+            // not been supplied yet. Saying "nothing has been added" would read
+            // as though the qualification did not exist.
+            <EmptyState
+              title={`No Qualification Unit data has been supplied for ${selectedQualification}.`}
+              description="The qualification is offered at the selected College and Campus. Its unit membership has not been supplied yet."
+              icon={GraduationCap}
+            />
+          ) : search ? (
+            <EmptyState
+              title="No records match the current filters."
+              description="Change the search term to see more records."
+              icon={GraduationCap}
+            />
+          ) : (
+            <EmptyState
+              title="No qualification and unit sequence has been added yet."
+              description={
+                canMaintain
+                  ? 'Select Add Unit to Sequence to record the first approved unit.'
+                  : 'No approved qualification and unit sequence records are currently available.'
+              }
+              icon={GraduationCap}
+            />
+          )
         }
         rowActions={
           canMaintain
@@ -655,7 +854,7 @@ function QualificationUnitPanel() {
           record={{
             primary: deleting.recordId,
             secondary: `${deleting.qualificationCode} · ${deleting.unitCode}`,
-            lines: [deleting.unitTitle, `Sequence ID: ${deleting.sequenceId}`],
+            lines: [deleting.unitTitle, `Sequence ID: ${deleting.deliveryOrder}`],
           }}
           onConfirm={confirmDelete}
         />
@@ -683,7 +882,7 @@ function QualificationUnitPanel() {
         })}
         onRestore={async (row, reason, reasonDetail) => {
           if (!user) return;
-          await getTdmsClient().restoreQualificationUnit(row.id, { reason, reasonDetail }, { actor: user });
+          await referenceApi.restoreQualificationUnit(Number(row.id), { reason_detail: reasonDetail ?? reason });
           toast.success('Record restored', { description: `${row.recordId} has been returned to active use.` });
           await Promise.all([load(), loadDeleted()]);
         }}

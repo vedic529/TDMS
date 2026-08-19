@@ -1,16 +1,17 @@
 import type { ExportFormat, ExportResult } from '@/types/common';
+import { buildXlsx } from '@/lib/xlsx';
 
 /**
  * Client-side export used by every operational page.
  *
  * SRS 2.3 / COL-06 / TRN-05: an export must use the filters currently shown on
  * the page. Callers therefore pass the rows that are visible, never the whole
- * mock dataset.
+ * dataset.
  *
- * CSV is produced properly in the browser. XLSX is *not* implemented in the
- * frontend prototype: the action, interface and result are real, but the file
- * produced is CSV and the returned `notice` says so. Production XLSX generation
- * belongs to the TDMS API (BULK-10, COL-06).
+ * Both formats produce a real file. CSV is written here; XLSX is written by
+ * `lib/xlsx.ts`, which packs the OOXML parts itself rather than renaming a CSV.
+ * The difference matters for identifiers: Excel reads the CSV text `000025` as
+ * the number 25 and drops the leading zeros, while the XLSX cell keeps it.
  */
 
 export interface ExportColumn<T> {
@@ -34,7 +35,7 @@ export function buildCsv<T>(columns: ExportColumn<T>[], rows: T[]): string {
   return `﻿${[header, ...body].join('\r\n')}`;
 }
 
-function triggerDownload(fileName: string, content: string, mimeType: string) {
+function triggerDownload(fileName: string, content: BlobPart, mimeType: string) {
   if (typeof window === 'undefined') return;
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -47,31 +48,37 @@ function triggerDownload(fileName: string, content: string, mimeType: string) {
   URL.revokeObjectURL(url);
 }
 
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
 export interface ExportRequest<T> {
   format: ExportFormat;
   /** Without extension, e.g. `tdms-timetable-2026-08-10`. */
   baseFileName: string;
   columns: ExportColumn<T>[];
   rows: T[];
+  /** Worksheet tab name for XLSX. Ignored by CSV, which has no sheets. */
+  sheetName?: string;
 }
 
-export function exportRows<T>({ format, baseFileName, columns, rows }: ExportRequest<T>): ExportResult {
-  const csv = buildCsv(columns, rows);
-
-  if (format === 'csv') {
-    const fileName = `${baseFileName}.csv`;
-    triggerDownload(fileName, csv, 'text/csv;charset=utf-8;');
+export function exportRows<T>({
+  format,
+  baseFileName,
+  columns,
+  rows,
+  sheetName,
+}: ExportRequest<T>): ExportResult {
+  if (format === 'xlsx') {
+    const workbook = buildXlsx({
+      name: sheetName ?? 'TDMS Export',
+      header: columns.map((column) => column.header),
+      rows: rows.map((row) => columns.map((column) => column.value(row))),
+    });
+    const fileName = `${baseFileName}.xlsx`;
+    triggerDownload(fileName, workbook, XLSX_MIME);
     return { format, fileName, rowCount: rows.length, status: 'generated' };
   }
 
   const fileName = `${baseFileName}.csv`;
-  triggerDownload(fileName, csv, 'text/csv;charset=utf-8;');
-  return {
-    format,
-    fileName,
-    rowCount: rows.length,
-    status: 'demo-fallback',
-    notice:
-      'XLSX generation is not implemented in the frontend prototype. A CSV file containing the same filtered rows has been downloaded. Production XLSX files will be produced by the TDMS API.',
-  };
+  triggerDownload(fileName, buildCsv(columns, rows), 'text/csv;charset=utf-8;');
+  return { format, fileName, rowCount: rows.length, status: 'generated' };
 }

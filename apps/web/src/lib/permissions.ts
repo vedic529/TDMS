@@ -1,42 +1,62 @@
 /**
- * Central TDMS permission configuration.
+ * Central TDMS permission configuration (Access Model v1.1).
  *
- * Every role check in the application resolves through this file. Components
- * must never test `role === 'ADMIN'` directly - they call a capability helper
- * so that ACC-06 (page buttons, navigation items and direct web addresses
- * enforce the same rules) holds by construction.
+ * Every role check in the interface resolves through this file. Components must
+ * never test `role === 'ADMIN'` directly - they call a capability helper, so
+ * that ACC-06 (page buttons, navigation items and direct web addresses enforce
+ * the same rules) holds by construction.
  *
- * Source: SRS 3.2 Complete Responsibilities, 3.3 Data Editor Work Assignments
- * and 3.4 Permission Matrix.
+ * This mirrors the API policy in `apps/api/app/core/rbac.py`. The API is
+ * authoritative: hiding a control is a courtesy to the user, and the only thing
+ * that actually stops an action is the server refusing it. Both files must be
+ * changed together.
  */
 
-import type { DataEditorAssignment, TdmsRole, TdmsUser } from '@/types/auth';
+import type { RequestableRole, TdmsRole, TdmsUser } from '@/types/auth';
 
 export type Capability =
   | 'view'
   | 'export'
-  | 'createStudent'
-  | 'editStudent'
-  | 'deleteStudent'
-  | 'processBulkStudentImport'
-  | 'createTimetable'
-  | 'editTimetable'
-  | 'deleteTimetable'
-  | 'overrideTimetableClash'
+  | 'maintainStudentData'
+  | 'maintainTimetable'
   | 'maintainTrainerData'
-  | 'maintainCourseData'
-  | 'maintainQualificationUnitData'
-  | 'manageMappings'
-  | 'manageUsers'
+  | 'maintainReferenceData'
+  | 'overrideTimetableClash'
   | 'viewActivityRecords'
-  | 'restoreDeletedRecords';
+  | 'accessAdministration'
+  | 'manageUserRoles'
+  | 'decideAccessRequests';
 
-const isDataEditor = (user: TdmsUser) => user.role === 'DATA_EDITOR';
+/** Ascending privilege. Matches the PostgreSQL `access_level` enum order. */
+const ROLE_RANK: Record<TdmsRole, number> = {
+  VIEWER: 0,
+  DATA_EDITOR: 1,
+  ADMIN: 2,
+  SUPER_ADMIN: 3,
+};
 
-const hasAssignment = (user: TdmsUser, assignment: DataEditorAssignment) =>
-  isDataEditor(user) && user.assignment === assignment;
-
-const isAdminOrAbove = (user: TdmsUser) => user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
+/**
+ * The minimum level each capability requires.
+ *
+ * Two entries carry the Access Model v1.1 changes that are easiest to get
+ * wrong: a Data Editor maintains BOTH Student Data and Timetable, and deciding
+ * access requests is Super Admin work - an Admin does not approve access
+ * requests or assign roles.
+ */
+const MINIMUM_LEVEL: Record<Capability, TdmsRole> = {
+  view: 'VIEWER',
+  export: 'VIEWER',
+  maintainStudentData: 'DATA_EDITOR',
+  maintainTimetable: 'DATA_EDITOR',
+  // Reference data stays read-and-download-only for a Data Editor.
+  maintainTrainerData: 'ADMIN',
+  maintainReferenceData: 'ADMIN',
+  overrideTimetableClash: 'ADMIN',
+  viewActivityRecords: 'SUPER_ADMIN',
+  accessAdministration: 'SUPER_ADMIN',
+  manageUserRoles: 'SUPER_ADMIN',
+  decideAccessRequests: 'SUPER_ADMIN',
+};
 
 /**
  * An inactive or disabled account never reaches an operational page (AUTH-05),
@@ -45,78 +65,62 @@ const isAdminOrAbove = (user: TdmsUser) => user.role === 'ADMIN' || user.role ==
 const isUsable = (user: TdmsUser | null | undefined): user is TdmsUser =>
   !!user && user.accountStatus === 'ACTIVE';
 
+export function rankOf(role: TdmsRole): number {
+  return ROLE_RANK[role];
+}
+
+export function atLeast(role: TdmsRole, minimum: TdmsRole): boolean {
+  return ROLE_RANK[role] >= ROLE_RANK[minimum];
+}
+
+export function hasCapability(user: TdmsUser | null, capability: Capability): boolean {
+  if (!isUsable(user)) return false;
+  return atLeast(user.role, MINIMUM_LEVEL[capability]);
+}
+
 // ---------------------------------------------------------------------------
 // Capability helpers
 // ---------------------------------------------------------------------------
 
-/** ACC-05: every approved user may view all operational pages. */
-export function canView(user: TdmsUser | null): boolean {
-  return isUsable(user);
-}
+/** Every approved user may view all four operational work areas (ACC-05). */
+export const canView = (user: TdmsUser | null) => hasCapability(user, 'view');
 
-/** SRS 3.4: every approved user may download or export filtered operational data. */
-export function canExport(user: TdmsUser | null): boolean {
-  return isUsable(user);
-}
+/** Every approved user may download or export filtered operational data. */
+export const canExport = (user: TdmsUser | null) => hasCapability(user, 'export');
 
-export function canCreateStudent(user: TdmsUser | null): boolean {
-  if (!isUsable(user)) return false;
-  return isAdminOrAbove(user) || hasAssignment(user, 'STUDENT_DATA_OFFICER');
-}
+/** Single Student Entry and Bulk Student Import. */
+export const canMaintainStudentData = (user: TdmsUser | null) =>
+  hasCapability(user, 'maintainStudentData');
 
-export const canEditStudent = canCreateStudent;
-export const canDeleteStudent = canCreateStudent;
-export const canProcessBulkStudentImport = canCreateStudent;
+/** Create, edit, delete, generate, preview and save timetables. */
+export const canMaintainTimetable = (user: TdmsUser | null) =>
+  hasCapability(user, 'maintainTimetable');
 
-export function canCreateTimetable(user: TdmsUser | null): boolean {
-  if (!isUsable(user)) return false;
-  return isAdminOrAbove(user) || hasAssignment(user, 'TIMETABLE_OFFICER');
-}
+/** TRN-06: Admin and Super Admin only. Read-and-download for everyone else. */
+export const canMaintainTrainerData = (user: TdmsUser | null) =>
+  hasCapability(user, 'maintainTrainerData');
 
-export const canEditTimetable = canCreateTimetable;
-export const canDeleteTimetable = canCreateTimetable;
+/** COL-07: Admin and Super Admin only. Read-and-download for everyone else. */
+export const canMaintainReferenceData = (user: TdmsUser | null) =>
+  hasCapability(user, 'maintainReferenceData');
 
-/**
- * TT-06 / OD-06: who may approve a clash override is an open decision. Until it
- * is approved, TDMS offers the override only to Admin and Super Admin and
- * records the reason, rather than inventing an approval rule.
- */
-export function canOverrideTimetableClash(user: TdmsUser | null): boolean {
-  return isUsable(user) && isAdminOrAbove(user);
-}
+export const canOverrideTimetableClash = (user: TdmsUser | null) =>
+  hasCapability(user, 'overrideTimetableClash');
 
-/** TRN-06: only Admin and Super Admin may maintain trainer reference data. */
-export function canMaintainTrainerData(user: TdmsUser | null): boolean {
-  return isUsable(user) && isAdminOrAbove(user);
-}
+/** LOG-04: activity records are part of the Super Admin dashboard. */
+export const canViewActivityRecords = (user: TdmsUser | null) =>
+  hasCapability(user, 'viewActivityRecords');
 
-/** COL-07: only Admin and Super Admin may maintain course reference data. */
-export function canMaintainCourseData(user: TdmsUser | null): boolean {
-  return isUsable(user) && isAdminOrAbove(user);
-}
+/** The Super Admin Dashboard as a whole. */
+export const canAccessAdministration = (user: TdmsUser | null) =>
+  hasCapability(user, 'accessAdministration');
 
-export const canMaintainQualificationUnitData = canMaintainCourseData;
+export const canManageUserRoles = (user: TdmsUser | null) =>
+  hasCapability(user, 'manageUserRoles');
 
-/**
- * SRS 3.4: managing college/campus/qualification mappings is Super Admin work.
- * An Admin may only do it when the delegation flag is explicitly set.
- */
-export function canManageMappings(user: TdmsUser | null): boolean {
-  if (!isUsable(user)) return false;
-  if (user.role === 'SUPER_ADMIN') return true;
-  return user.role === 'ADMIN' && user.delegatedMappingManagement;
-}
-
-/** SRS 3.4 / 3.2: Super Admin manages all users; Admin within delegated authority. */
-export function canManageUsers(user: TdmsUser | null): boolean {
-  if (!isUsable(user)) return false;
-  return isAdminOrAbove(user);
-}
-
-/** LOG-04: only Super Admin and Admin may view user activity records. */
-export function canViewActivityRecords(user: TdmsUser | null): boolean {
-  return isUsable(user) && isAdminOrAbove(user);
-}
+/** Approving or denying an access request. Super Admin only - never Admin. */
+export const canDecideAccessRequests = (user: TdmsUser | null) =>
+  hasCapability(user, 'decideAccessRequests');
 
 /** Restoring a soft-deleted record uses the same authority as deleting it. */
 export function canRestoreRecord(
@@ -125,49 +129,51 @@ export function canRestoreRecord(
 ): boolean {
   switch (recordType) {
     case 'student':
-      return canDeleteStudent(user);
+      return canMaintainStudentData(user);
     case 'timetable':
-      return canDeleteTimetable(user);
+      return canMaintainTimetable(user);
     case 'trainer':
       return canMaintainTrainerData(user);
     case 'course':
-      return canMaintainCourseData(user);
     case 'qualificationUnit':
-      return canMaintainQualificationUnitData(user);
+      return canMaintainReferenceData(user);
     default:
       return false;
   }
 }
 
 /**
- * OD-05 keeps the Admin role boundary open. Until it is approved:
- *  - a Super Admin may act on any account;
- *  - an Admin may act on a Data Editor;
- *  - an Admin may act on another Admin only with the delegation flag;
- *  - an Admin may never act on a Super Admin.
- * The reason is returned so the UI can explain a disabled action.
+ * Whether the acting user may change this account.
+ *
+ * Two administrative lockout protections, both also enforced server-side:
+ * nobody changes their own access level, and the last active Super Admin
+ * cannot be removed. The reason is returned so the interface can explain a
+ * disabled action rather than leaving the user guessing.
  */
 export function canManageTargetUser(
   actor: TdmsUser | null,
   target: TdmsUser,
+  context?: { activeSuperAdminCount: number },
 ): { allowed: boolean; reason?: string } {
   if (!isUsable(actor)) return { allowed: false, reason: 'Your account is not active.' };
-  if (!canManageUsers(actor)) {
-    return { allowed: false, reason: 'Managing TDMS users requires Admin or Super Admin access.' };
+  if (!canManageUserRoles(actor)) {
+    return { allowed: false, reason: 'Managing TDMS access levels requires Super Admin access.' };
   }
-  if (actor.role === 'SUPER_ADMIN') return { allowed: true };
-
-  if (target.role === 'SUPER_ADMIN') {
+  if (actor.id === target.id) {
     return {
       allowed: false,
-      reason: 'An Admin cannot change a Super Admin account. Super Admin account changes remain restricted (OD-05).',
+      reason: 'You cannot change your own access level. Ask another Super Admin to make this change.',
     };
   }
-  if (target.role === 'ADMIN' && !actor.delegatedUserManagement) {
+  if (
+    target.role === 'SUPER_ADMIN' &&
+    context &&
+    context.activeSuperAdminCount <= 1 &&
+    target.accountStatus === 'ACTIVE'
+  ) {
     return {
       allowed: false,
-      reason:
-        'Changing another Admin account requires delegated user management authority. The Admin role boundary is an open decision (OD-05).',
+      reason: 'This is the last active Super Admin. Grant Super Admin to another account first.',
     };
   }
   return { allowed: true };
@@ -177,85 +183,30 @@ export function canManageTargetUser(
 // Aggregate view used by pages and guards
 // ---------------------------------------------------------------------------
 
-export interface PermissionSet {
-  view: boolean;
-  export: boolean;
-  createStudent: boolean;
-  editStudent: boolean;
-  deleteStudent: boolean;
-  processBulkStudentImport: boolean;
-  createTimetable: boolean;
-  editTimetable: boolean;
-  deleteTimetable: boolean;
-  overrideTimetableClash: boolean;
-  maintainTrainerData: boolean;
-  maintainCourseData: boolean;
-  maintainQualificationUnitData: boolean;
-  manageMappings: boolean;
-  manageUsers: boolean;
-  viewActivityRecords: boolean;
-}
+export type PermissionSet = Record<Capability, boolean>;
 
 export function getPermissions(user: TdmsUser | null): PermissionSet {
-  return {
-    view: canView(user),
-    export: canExport(user),
-    createStudent: canCreateStudent(user),
-    editStudent: canEditStudent(user),
-    deleteStudent: canDeleteStudent(user),
-    processBulkStudentImport: canProcessBulkStudentImport(user),
-    createTimetable: canCreateTimetable(user),
-    editTimetable: canEditTimetable(user),
-    deleteTimetable: canDeleteTimetable(user),
-    overrideTimetableClash: canOverrideTimetableClash(user),
-    maintainTrainerData: canMaintainTrainerData(user),
-    maintainCourseData: canMaintainCourseData(user),
-    maintainQualificationUnitData: canMaintainQualificationUnitData(user),
-    manageMappings: canManageMappings(user),
-    manageUsers: canManageUsers(user),
-    viewActivityRecords: canViewActivityRecords(user),
-  };
+  return (Object.keys(MINIMUM_LEVEL) as Capability[]).reduce((set, capability) => {
+    set[capability] = hasCapability(user, capability);
+    return set;
+  }, {} as PermissionSet);
 }
 
-export function hasCapability(user: TdmsUser | null, capability: Capability): boolean {
-  switch (capability) {
-    case 'view':
-      return canView(user);
-    case 'export':
-      return canExport(user);
-    case 'createStudent':
-      return canCreateStudent(user);
-    case 'editStudent':
-      return canEditStudent(user);
-    case 'deleteStudent':
-      return canDeleteStudent(user);
-    case 'processBulkStudentImport':
-      return canProcessBulkStudentImport(user);
-    case 'createTimetable':
-      return canCreateTimetable(user);
-    case 'editTimetable':
-      return canEditTimetable(user);
-    case 'deleteTimetable':
-      return canDeleteTimetable(user);
-    case 'overrideTimetableClash':
-      return canOverrideTimetableClash(user);
-    case 'maintainTrainerData':
-      return canMaintainTrainerData(user);
-    case 'maintainCourseData':
-      return canMaintainCourseData(user);
-    case 'maintainQualificationUnitData':
-      return canMaintainQualificationUnitData(user);
-    case 'manageMappings':
-      return canManageMappings(user);
-    case 'manageUsers':
-      return canManageUsers(user);
-    case 'viewActivityRecords':
-      return canViewActivityRecords(user);
-    case 'restoreDeletedRecords':
-      return canDeleteStudent(user) || canDeleteTimetable(user) || canMaintainCourseData(user);
-    default:
-      return false;
-  }
+// ---------------------------------------------------------------------------
+// Access requests
+// ---------------------------------------------------------------------------
+
+/** VIEWER is the default level, so it is never something to request. */
+export const REQUESTABLE_ROLES: RequestableRole[] = ['DATA_EDITOR', 'ADMIN', 'SUPER_ADMIN'];
+
+/**
+ * Which roles this user may request: strictly higher ones only.
+ *
+ * A user cannot request their current role or a lower one. A reduction is an
+ * administrative action a Super Admin performs, not something a user asks for.
+ */
+export function requestableRolesFor(role: TdmsRole): RequestableRole[] {
+  return REQUESTABLE_ROLES.filter((candidate) => ROLE_RANK[candidate] > ROLE_RANK[role]);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,57 +214,33 @@ export function hasCapability(user: TdmsUser | null, capability: Capability): bo
 // ---------------------------------------------------------------------------
 
 export const ROLE_LABELS: Record<TdmsRole, string> = {
-  SUPER_ADMIN: 'Super Admin',
-  ADMIN: 'Admin',
+  VIEWER: 'Viewer',
   DATA_EDITOR: 'Data Editor',
+  ADMIN: 'Admin',
+  SUPER_ADMIN: 'Super Admin',
 };
 
-export const ASSIGNMENT_LABELS: Record<DataEditorAssignment, string> = {
-  STUDENT_DATA_OFFICER: 'Student Data Officer',
-  TIMETABLE_OFFICER: 'Timetable Officer',
+export const ROLE_DESCRIPTIONS: Record<TdmsRole, string> = {
+  VIEWER: 'View, search, filter and download every work area. No changes.',
+  DATA_EDITOR:
+    'Everything a Viewer can do, plus maintaining Student Data and Timetables. Trainer and reference data stay view-only.',
+  ADMIN: 'All operational work, including trainer and course reference data.',
+  SUPER_ADMIN: 'Full TDMS access, including the administration dashboard, roles and access requests.',
 };
 
-/**
- * Only these three values may ever populate a role selection control.
- * Work assignments are deliberately excluded (ACC-02).
- */
-export const ROLE_OPTIONS: Array<{ value: TdmsRole; label: string; description: string }> = [
-  {
-    value: 'SUPER_ADMIN',
-    label: ROLE_LABELS.SUPER_ADMIN,
-    description: 'Full TDMS access, including user management and approved mappings.',
-  },
-  {
-    value: 'ADMIN',
-    label: ROLE_LABELS.ADMIN,
-    description: 'All operational work, user management within delegated authority.',
-  },
-  {
-    value: 'DATA_EDITOR',
-    label: ROLE_LABELS.DATA_EDITOR,
-    description: 'Create, edit and delete within one assigned work area only.',
-  },
-];
+/** Ascending privilege - the order a role selector should offer. */
+export const ROLE_OPTIONS: Array<{ value: TdmsRole; label: string; description: string }> = (
+  ['VIEWER', 'DATA_EDITOR', 'ADMIN', 'SUPER_ADMIN'] as TdmsRole[]
+).map((value) => ({ value, label: ROLE_LABELS[value], description: ROLE_DESCRIPTIONS[value] }));
 
-export const ASSIGNMENT_OPTIONS: Array<{ value: DataEditorAssignment; label: string; description: string }> = [
-  {
-    value: 'STUDENT_DATA_OFFICER',
-    label: ASSIGNMENT_LABELS.STUDENT_DATA_OFFICER,
-    description: 'Single Student Entry and Bulk Student Import.',
-  },
-  {
-    value: 'TIMETABLE_OFFICER',
-    label: ASSIGNMENT_LABELS.TIMETABLE_OFFICER,
-    description: 'Timetable View and Management.',
-  },
-];
-
-/** Short explanation shown on a read-only page for a Data Editor. */
+/** Short explanation shown on a page the user can see but not change. */
 export function readOnlyReason(user: TdmsUser | null, area: string): string {
   if (!user) return 'Sign in to view this information.';
+  if (user.role === 'VIEWER') {
+    return `You have view-only access to ${area}. Viewer access covers searching, filtering and downloading. Request Data Editor access from your account menu if you need to make changes.`;
+  }
   if (user.role === 'DATA_EDITOR') {
-    const assignment = user.assignment ? ASSIGNMENT_LABELS[user.assignment] : 'Data Editor';
-    return `You have view-only access to ${area}. Your ${assignment} work assignment does not include changing this information. You can still view, filter and download it.`;
+    return `You have view-only access to ${area}. Data Editor access covers Student Data and Timetables; maintaining this information requires Admin access. You can still view, filter and download it.`;
   }
   return `You have view-only access to ${area}.`;
 }

@@ -48,7 +48,7 @@ const EMPTY: TrainerInput = {
   location: '',
   locationType: 'Campus',
   workingTime: '09:00 - 17:00',
-  deliveryType: 'Theory',
+  classType: 'Theory',
   monday: 'Not Available',
   tuesday: 'Not Available',
   wednesday: 'Not Available',
@@ -233,7 +233,7 @@ export function TrainerFormDrawer({ open, onOpenChange, editing, onSaved }: Trai
         { key: 'location', label: 'Location' },
         { key: 'locationType', label: 'Location Type' },
         { key: 'workingTime', label: 'Working Time' },
-        { key: 'deliveryType', label: 'Delivery Type' },
+        { key: 'classType', label: 'Delivery Type' },
         { key: 'monday', label: 'Monday' },
         { key: 'tuesday', label: 'Tuesday' },
         { key: 'wednesday', label: 'Wednesday' },
@@ -322,8 +322,8 @@ export function TrainerFormDrawer({ open, onOpenChange, editing, onSaved }: Trai
                     <FormField label="Delivery Type" htmlFor="trainer-delivery-type">
                       <SimpleSelect
                         id="trainer-delivery-type"
-                        value={input.deliveryType}
-                        onChange={(value) => update('deliveryType', value as TrainerInput['deliveryType'])}
+                        value={input.classType}
+                        onChange={(value) => update('classType', value as TrainerInput['classType'])}
                         options={TRAINER_DELIVERY_TYPE_OPTIONS.map((option) => ({ value: option, label: option }))}
                         placeholder="Select delivery type"
                       />
@@ -485,7 +485,7 @@ function previewGroups(input: TrainerInput) {
         { label: 'Location', value: input.location },
         { label: 'Location Type', value: input.locationType },
         { label: 'Working Time', value: input.workingTime },
-        { label: 'Delivery Type', value: input.deliveryType },
+        { label: 'Delivery Type', value: input.classType },
         { label: 'Status', value: input.isActive ? 'Active' : 'Inactive' },
       ],
     },

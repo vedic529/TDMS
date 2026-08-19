@@ -30,6 +30,21 @@ export interface StagedStudentRow {
   collegeValue: string;
   campusValue: string;
   qualificationValue: string;
+  /**
+   * Approved 13 August 2026. `Yes` or `No` — Credit Transfer.
+   *
+   * Required input, and the only field added to the bulk contract, because it
+   * cannot be derived from anything else in the file and it decides whether
+   * Group, Intake and Course Duration Option apply at all.
+   */
+  ctStudent: string;
+  /**
+   * Approved 11 August 2026. Expected to be `Group 1`...`Group N` for the ten
+   * group-enabled qualifications and `N/A` for every other one.
+   *
+   * Ignored when `ctStudent` is Yes: a credit-transfer student has no group.
+   */
+  group: string;
   coeStatus: string;
   proposedStartDate: string;
   proposedEndDate: string;
