@@ -17,6 +17,7 @@ export const INTERFACE_NAMES = {
   referenceData: 'College and Course Reference Data',
   courseData: 'Course Data',
   qualificationUnitSequence: 'Qualification and Unit Sequence Data',
+  facilityData: 'Facility Data',
   administration: 'Administration',
   userActivityRecords: 'User Activity Records',
 } as const;
@@ -32,6 +33,7 @@ export const SRS_PAGE_REFERENCE = {
   trainerData: 'Page 3 - Trainer Data',
   courseData: 'Page 4A - Course Data',
   qualificationUnitSequence: 'Page 4B - Qualification and Unit Sequence Data',
+  facilityData: 'Page 4C - Facility Data',
   login: 'Login and Authentication',
   administration: 'Administration',
 } as const;

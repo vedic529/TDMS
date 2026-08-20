@@ -22,7 +22,7 @@ from app.models.activity import UserActivityRecord
 from app.models.college import Campus, College, CollegeCampus
 from app.models.qualification import Qualification, QualificationUnit, Unit
 from app.models.course import CourseOffering, CourseStatus, OfferingDurationOption
-from app.models.facility import Facility
+from app.models.facility import Facility, FacilityCollege, FacilityFaculty
 
 # Students
 from app.models.student import Student, StudentGroup
@@ -61,6 +61,8 @@ __all__ = [
     "CourseOffering",
     "OfferingDurationOption",
     "Facility",
+    "FacilityCollege",
+    "FacilityFaculty",
     # students
     "StudentGroup",
     "Student",
@@ -101,6 +103,8 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "course_offerings",
     "offering_duration_options",
     "facilities",
+    "facility_colleges",
+    "facility_faculties",
     "student_groups",
     "students",
     "trainers",

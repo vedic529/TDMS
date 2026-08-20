@@ -236,12 +236,18 @@ export function QualificationUnitFormDialog({
       if (editing) {
         await referenceApi.updateQualificationUnit(Number(editing.id), {
           unit_id: unit?.id,
-          delivery_order: input.deliveryOrder,
+          // Omitted rather than sent as null: a membership may legitimately
+          // have no approved sequence, and the update contract treats an
+          // absent value as "leave it alone".
+          delivery_order: input.deliveryOrder ?? undefined,
         });
         toast.success('Record updated', { description: `${input.unitCode} was updated.` });
       } else {
         if (!qualification) throw new Error('Select an approved qualification.');
         if (!unit) throw new Error('Select an approved unit.');
+        // A new record states a position, so the field is required here even
+        // though an imported membership may have none.
+        if (input.deliveryOrder == null) throw new Error('Enter a Sequence ID.');
         await referenceApi.createQualificationUnit({
           qualification_id: qualification.id,
           unit_id: unit.id,

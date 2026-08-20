@@ -980,3 +980,48 @@ class TestEmptyDatabase:
             response = client.get(path, headers=as_user(VIEWER))
             assert response.status_code == 200, path
             assert response.json() == [], path
+
+
+# ------------------------------------- membership without a delivery sequence
+
+
+@pytest.mark.database
+def test_page_4b_lists_a_membership_that_has_no_approved_order(client, people, seed):
+    """A unit in a qualification with no approved teaching order must still list.
+
+    Migration `d58f1a4c7e93` made `delivery_order` nullable so a unit's
+    *membership* of a qualification could be stored without inventing an order:
+    membership comes from Qualification Data, the order comes from an approved
+    rolling timetable, and only some qualifications have one.
+
+    The read contract stayed `int` and rejected every such row, so the endpoint
+    returned an error and Page 4B rendered empty while 1,012 real memberships
+    sat in the database. This pins the contract to the column it describes.
+    """
+    from app.models.qualification import QualificationUnit
+
+    created = client.post(
+        "/reference/qualification-units",
+        json={
+            "qualification_id": seed["qualification"]["id"],
+            "unit_id": seed["unit"]["id"],
+            "delivery_order": 1,
+        },
+        headers=as_user(ADMIN),
+    )
+    assert created.status_code == 201, created.text
+
+    # Clear the order the way an import does: membership recorded, sequence not
+    # supplied. No maintenance route removes one, so this is written directly.
+    db = next(client.app.dependency_overrides[deps.get_db]())
+    link = db.query(QualificationUnit).one()
+    link.delivery_order = None
+    db.commit()
+
+    response = client.get("/reference/qualification-units", headers=as_user(VIEWER))
+    assert response.status_code == 200, response.text
+
+    rows = response.json()
+    assert len(rows) == 1, "the unsequenced membership was dropped from the response"
+    assert rows[0]["delivery_order"] is None
+    assert rows[0]["unit_code"] == "TESTUNIT001"

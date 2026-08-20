@@ -4,11 +4,13 @@ import type {
   ApiCourse,
   ApiQualification,
   ApiQualificationUnit,
+  ApiFacility,
 } from '@/services/reference-api';
 import type {
   Campus,
   College,
   CourseRecord,
+  FacilityRecord,
   QualificationUnitSequence,
   UocType,
 } from '@/types/reference';
@@ -136,5 +138,36 @@ export function toQualificationOption(row: ApiQualification) {
   return {
     value: String(row.id),
     label: `${qualificationCodeLabel(row.qualification_code)} — ${row.qualification_title}`,
+  };
+}
+
+/**
+ * Facility Data as the table shows it.
+ *
+ * `state` and `campusName` arrive already resolved through the campus, so this
+ * only renames fields to the frontend's casing. Nothing is derived here — a
+ * value the API did not send is a value the table does not show.
+ */
+export function toFacilityRecord(row: ApiFacility): FacilityRecord {
+  return {
+    id: String(row.id),
+    classroomName: row.facility_reference,
+    campusId: String(row.campus_id),
+    campusName: row.campus_name,
+    state: row.state,
+    sourceLocation: row.source_location,
+    classroomType: row.facility_type,
+    capacity: row.capacity,
+    isActive: row.is_active,
+    collegeShortNames: row.college_short_names,
+    faculties: row.faculties.map((rule) => ({
+      faculty: rule.faculty,
+      monday: rule.monday,
+      tuesday: rule.tuesday,
+      wednesday: rule.wednesday,
+      thursday: rule.thursday,
+      friday: rule.friday,
+      remarks: rule.remarks,
+    })),
   };
 }

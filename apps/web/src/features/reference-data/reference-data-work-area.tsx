@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { BookOpen, GraduationCap, ListOrdered, Pencil, Plus, Trash2 } from 'lucide-react';
+import { BookOpen, DoorOpen, GraduationCap, ListOrdered, Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,7 @@ import { DeleteConfirmationDialog } from '@/components/common/delete-confirmatio
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { CourseFormDrawer } from './course-form-drawer';
 import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
+import { FacilityDataPanel } from './facility-data-panel';
 import { useReferenceLookups } from './use-reference-lookups';
 import { useCascadingFilters } from './use-cascading-filters';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
@@ -32,13 +33,14 @@ import { formatCurrency, today } from '@/lib/format';
 import type { ReasonCode } from '@/types/common';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
 
-type TabValue = 'course-data' | 'qualification-unit-sequence';
+type TabValue = 'course-data' | 'qualification-unit-sequence' | 'facility-data';
 
 export function ReferenceDataWorkArea() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const tab: TabValue = tabParam === 'qualification-unit-sequence' ? 'qualification-unit-sequence' : 'course-data';
+  const tab: TabValue =
+    tabParam === 'qualification-unit-sequence' || tabParam === 'facility-data' ? tabParam : 'course-data';
 
   return (
     <div className="space-y-5">
@@ -65,6 +67,10 @@ export function ReferenceDataWorkArea() {
             <ListOrdered aria-hidden="true" />
             {INTERFACE_NAMES.qualificationUnitSequence}
           </TabsTrigger>
+          <TabsTrigger value="facility-data">
+            <DoorOpen aria-hidden="true" />
+            {INTERFACE_NAMES.facilityData}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="course-data">
@@ -73,6 +79,10 @@ export function ReferenceDataWorkArea() {
 
         <TabsContent value="qualification-unit-sequence">
           <QualificationUnitPanel />
+        </TabsContent>
+
+        <TabsContent value="facility-data">
+          <FacilityDataPanel />
         </TabsContent>
       </Tabs>
     </div>
@@ -619,8 +629,18 @@ function QualificationUnitPanel() {
     {
       id: 'deliveryOrder',
       header: 'Sequence ID',
-      cell: (row) => row.deliveryOrder,
-      sortValue: (row) => row.deliveryOrder,
+      // Blank where no approved rolling timetable supplies an order. The unit
+      // still belongs to the qualification — membership and teaching order are
+      // different facts, and only the second can be missing (OD-07).
+      cell: (row) =>
+        row.deliveryOrder ?? (
+          <span className="text-muted-foreground" title="No approved delivery sequence yet">
+            &mdash;
+          </span>
+        ),
+      // Unsequenced rows sort last rather than first, so an approved sequence
+      // still reads 1, 2, 3 from the top.
+      sortValue: (row) => row.deliveryOrder ?? Number.MAX_SAFE_INTEGER,
       align: 'right',
     },
   ];

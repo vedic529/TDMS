@@ -80,8 +80,12 @@ export interface QualificationUnitSequence extends SoftDeletable {
    * ID" is not a Page 4B field - a relational table has no inherent row order,
    * so the ordinal is persisted and used for ordering, but not displayed as a
    * column. TT-08 depends on it.
+   *
+   * `null` where no approved sequence exists. Membership of a qualification
+   * comes from Qualification Data; the teaching order comes from an approved
+   * rolling timetable, and only some qualifications have one (OD-07).
    */
-  deliveryOrder: number;
+  deliveryOrder: number | null;
   /** C-4: SRS 8.3 Source URL, held on the qualification. */
   sourceUrl?: string;
   /** Used only to filter Page 4B by college/campus. */
@@ -106,6 +110,41 @@ export interface Facility {
   facilityType: FacilityType;
   capacity: number;
   isActive: boolean;
+}
+
+/**
+ * A facility as supplied by Facility Data, with the colleges and faculties
+ * allowed to use it.
+ *
+ * `Facility` above is the minimum TT-15 shape used for clash checking. This is
+ * the reference-data view: same room, more of what the source file says about
+ * it. `state` and `campusName` are read through the campus, never stored twice.
+ */
+export interface FacilityRecord {
+  id: string;
+  classroomName: string;
+  campusId: string;
+  campusName: string;
+  state: string;
+  /** The Location exactly as supplied — two buildings can share one campus. */
+  sourceLocation: string;
+  classroomType: string;
+  capacity: number;
+  isActive: boolean;
+  collegeShortNames: string[];
+  faculties: FacilityFacultyRule[];
+}
+
+export interface FacilityFacultyRule {
+  /** As supplied. `NA` means every faculty; `ELICOS` has no qualification prefix. */
+  faculty: string;
+  monday: boolean;
+  tuesday: boolean;
+  wednesday: boolean;
+  thursday: boolean;
+  friday: boolean;
+  /** `null` where the source said `NA`. Informational only. */
+  remarks: string | null;
 }
 
 export type FacilityType = 'Classroom' | 'Commercial Kitchen' | 'Workshop' | 'Computer Lab' | 'Virtual Classroom';

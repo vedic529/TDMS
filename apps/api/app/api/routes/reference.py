@@ -24,6 +24,7 @@ from app.models.course import CourseOffering
 from app.models.qualification import QualificationUnit
 from app.models.user import User
 from app.schemas import reference as schemas
+from app.services import facilities as facility_service
 from app.services import reference_data as service
 
 router = APIRouter(prefix="/reference", tags=["reference data"])
@@ -653,3 +654,94 @@ def list_course_statuses(
     session: Session = Depends(get_db),
 ):
     return service.list_course_statuses(session, active_only=active_only)
+
+
+# --------------------------------------------------------------- facilities
+#
+# Read-only for now, matching the supplied requirement: Facility Data is
+# imported and displayed. No create/edit route is added, because none was asked
+# for and an unused write path is a liability, not a feature.
+
+
+def _facility_read(facility) -> schemas.FacilityRead:
+    """Compose the Facility Data view.
+
+    `state` and `campus_name` come through the campus rather than off the
+    facility, so the two can never disagree.
+    """
+    return schemas.FacilityRead(
+        id=facility.id,
+        facility_reference=facility.facility_reference,
+        campus_id=facility.campus_id,
+        campus_name=facility.campus.campus_name,
+        state=facility.campus.state,
+        source_location=facility.source_location,
+        facility_type=facility.facility_type,
+        capacity=facility.capacity,
+        is_active=facility.is_active,
+        college_short_names=sorted(
+            link.college.college_short_name for link in facility.colleges
+        ),
+        faculties=[
+            schemas.FacilityFacultyRead.model_validate(rule)
+            for rule in sorted(facility.faculties, key=lambda r: r.faculty)
+        ],
+    )
+
+
+@router.get("/facilities", response_model=list[schemas.FacilityRead], responses=READ_RESPONSES)
+def list_facilities(
+    campus_ids: list[int] | None = Query(
+        default=None, description="Repeatable. Empty means every campus."
+    ),
+    college_ids: list[int] | None = Query(
+        default=None, description="Repeatable. Empty means every college."
+    ),
+    faculty: str | None = Query(
+        default=None, description="Exact faculty as supplied, e.g. `Business` or `NA`."
+    ),
+    active_only: bool = Query(default=False),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    rows = facility_service.list_facilities(
+        session,
+        campus_ids=campus_ids,
+        college_ids=college_ids,
+        faculty=faculty,
+        active_only=active_only,
+    )
+    return [_facility_read(row) for row in rows]
+
+
+@router.get(
+    "/facilities/eligible", response_model=list[schemas.FacilityRead], responses=READ_RESPONSES
+)
+def list_eligible_facilities(
+    qualification_code: str = Query(
+        description="Faculty is taken from the first three letters, not the whole code."
+    ),
+    weekday: str = Query(description="MONDAY through FRIDAY."),
+    campus_id: int | None = Query(default=None),
+    college_id: int | None = Query(default=None),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """Rooms that may host this qualification on this weekday.
+
+    Only the two confirmed rules apply: faculty suitability (with `NA` matching
+    everything) and weekday availability. Capacity and Classroom Type are
+    returned for display and do not filter — no rule about either has been
+    approved.
+    """
+    try:
+        eligible = facility_service.eligible_facilities(
+            session,
+            qualification_code=qualification_code,
+            weekday=weekday,
+            campus_id=campus_id,
+            college_id=college_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error))
+    return [_facility_read(entry.facility) for entry in eligible]

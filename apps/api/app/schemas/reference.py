@@ -305,7 +305,15 @@ class QualificationUnitRead(BaseModel):
     unit_code: str
     unit_title: str
     uoc_type: str | None = None
-    delivery_order: int
+    #: `None` where no approved delivery sequence exists.
+    #:
+    #: Migration `d58f1a4c7e93` made the column nullable so a unit's *membership*
+    #: of a qualification could be stored without inventing a teaching order —
+    #: membership comes from Qualification Data, order comes from an approved
+    #: rolling timetable, and only some qualifications have one. This contract
+    #: stayed `int` and rejected every such row, so the endpoint failed and
+    #: Page 4B rendered empty while 1,012 real memberships sat in the database.
+    delivery_order: int | None = None
     is_deleted: bool = False
 
 
@@ -443,3 +451,46 @@ class DeleteRequest(BaseModel):
 class RestoreRequest(BaseModel):
     reason_code_id: int | None = None
     reason_detail: str | None = Field(default=None, max_length=1000)
+
+
+# --------------------------------------------------------------- facilities
+
+
+class FacilityFacultyRead(BaseModel):
+    """One faculty's permission to use a room, and the days it may."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    faculty: str
+    monday: bool
+    tuesday: bool
+    wednesday: bool
+    thursday: bool
+    friday: bool
+    #: `None` where the source said `NA`. Informational only — nothing reads it.
+    remarks: str | None = None
+
+
+class FacilityRead(BaseModel):
+    """A room, with the colleges and faculties allowed to use it.
+
+    `state` and `campus_name` are read through the campus rather than stored on
+    the facility: `campuses.state` already carries the state, and duplicating it
+    would let the two disagree.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    facility_reference: str
+    campus_id: int
+    campus_name: str
+    state: str
+    #: The Location exactly as supplied. Two buildings can share a campus, so
+    #: this is what separates `Room 4` in one from `Room 4` in the other.
+    source_location: str
+    facility_type: str
+    capacity: int
+    is_active: bool
+    college_short_names: list[str] = Field(default_factory=list)
+    faculties: list[FacilityFacultyRead] = Field(default_factory=list)

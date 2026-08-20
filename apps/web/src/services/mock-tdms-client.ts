@@ -814,7 +814,7 @@ export class MockTdmsClient implements TdmsClient {
     });
     return delay(
       [...rows].sort(
-        (a, b) => a.qualificationCode.localeCompare(b.qualificationCode) || a.deliveryOrder - b.deliveryOrder,
+        (a, b) => a.qualificationCode.localeCompare(b.qualificationCode) || (a.deliveryOrder ?? Number.MAX_SAFE_INTEGER) - (b.deliveryOrder ?? Number.MAX_SAFE_INTEGER),
       ),
     );
   }

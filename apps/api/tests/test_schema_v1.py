@@ -142,7 +142,7 @@ def test_expected_foreign_key_count(engine):
     # and access_requests.decided_by_user_id), plus 2 from the 14 August 2026
     # alias tables (campus_source_addresses.campus_id and
     # qualification_supersessions.qualification_id).
-    assert total == 58, f"expected 58 foreign keys, found {total}"
+    assert total == 61, f"expected 61 foreign keys, found {total}"
 
 
 def test_no_foreign_key_uses_set_null(engine):
@@ -172,6 +172,8 @@ def test_cascade_deletes_only_where_approved(engine):
             "reason_code_contexts",
             "import_staged_rows",
             "campus_source_addresses",
+    "facility_colleges",
+    "facility_faculties",
             "import_row_issues",
             "trainer_availability",
             "trainer_qualifications",
@@ -228,7 +230,7 @@ def test_approved_check_constraint_exists(engine, table_name, constraint_name):
         ("qualification_units", ["qualification_id", "unit_id"]),
         ("qualification_units", ["qualification_id", "delivery_order"]),
         ("offering_duration_options", ["course_offering_id", "duration_weeks"]),
-        ("facilities", ["campus_id", "facility_reference"]),
+        ("facilities", ["campus_id", "source_location", "facility_reference"]),
         ("trainer_qualifications", ["trainer_id", "qualification_id"]),
         ("trainer_units", ["trainer_id", "unit_id"]),
         ("timetable_unit_deliveries", ["timetable_plan_id", "unit_id"]),

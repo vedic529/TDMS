@@ -271,7 +271,11 @@ export function validateTimetableInput(
   if (input.qualificationCode && input.uocCode) {
     const sequence = context.unitSequences
       .filter((entry) => entry.qualificationCode === input.qualificationCode)
-      .sort((a, b) => a.deliveryOrder - b.deliveryOrder);
+      .sort(
+      // A membership with no approved order sorts last, so an approved
+      // sequence still reads 1, 2, 3 from the top.
+      (a, b) => (a.deliveryOrder ?? Number.MAX_SAFE_INTEGER) - (b.deliveryOrder ?? Number.MAX_SAFE_INTEGER),
+    );
     const current = sequence.find((entry) => entry.unitCode === input.uocCode);
 
     if (sequence.length > 0 && !current) {
@@ -288,9 +292,20 @@ export function validateTimetableInput(
       const scheduledForGroup = new Set(
         others.filter((session) => session.group === input.group).map((session) => session.uocCode),
       );
-      const missingEarlier = sequence
-        .filter((entry) => entry.deliveryOrder < current.deliveryOrder && !scheduledForGroup.has(entry.unitCode))
-        .map((entry) => entry.unitCode);
+      // "Earlier" only means something when both units have an approved
+      // order. Where either is missing there is no ordering fact to compare,
+      // and assuming one would invent a teaching sequence (OD-07).
+      const missingEarlier =
+        current.deliveryOrder == null
+          ? []
+          : sequence
+              .filter(
+                (entry) =>
+                  entry.deliveryOrder != null &&
+                  entry.deliveryOrder < current.deliveryOrder! &&
+                  !scheduledForGroup.has(entry.unitCode),
+              )
+              .map((entry) => entry.unitCode);
 
       if (missingEarlier.length > 0) {
         issues.push({

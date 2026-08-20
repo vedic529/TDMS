@@ -181,7 +181,11 @@ export function TimetableFormDrawer({
         entry.qualificationCode === input.qualificationCode &&
         (!input.campusId || entry.campusId === input.campusId),
     )
-    .sort((a, b) => a.deliveryOrder - b.deliveryOrder);
+    .sort(
+      // A membership with no approved order sorts last, so an approved
+      // sequence still reads 1, 2, 3 from the top.
+      (a, b) => (a.deliveryOrder ?? Number.MAX_SAFE_INTEGER) - (b.deliveryOrder ?? Number.MAX_SAFE_INTEGER),
+    );
 
   const eligibleTrainers = (data?.trainers ?? []).filter(
     (trainer) => trainer.isActive && trainer.qualificationsCanTeach.includes(input.qualificationCode),

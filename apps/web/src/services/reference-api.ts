@@ -89,7 +89,7 @@ export interface ApiQualificationUnit {
   unit_title: string;
   uoc_type: string | null;
   /** C-1: the approved delivery sequence. Orders rows; not a displayed field. */
-  delivery_order: number;
+  delivery_order: number | null;
   is_deleted: boolean;
 }
 
@@ -240,7 +240,64 @@ function defaultMessage(status: number): string {
 // Reference data API
 // ---------------------------------------------------------------------------
 
+export interface ApiFacilityFaculty {
+  faculty: string;
+  monday: boolean;
+  tuesday: boolean;
+  wednesday: boolean;
+  thursday: boolean;
+  friday: boolean;
+  remarks: string | null;
+}
+
+export interface ApiFacility {
+  id: number;
+  facility_reference: string;
+  campus_id: number;
+  campus_name: string;
+  state: string;
+  source_location: string;
+  facility_type: string;
+  capacity: number;
+  is_active: boolean;
+  college_short_names: string[];
+  faculties: ApiFacilityFaculty[];
+}
+
 export const referenceApi = {
+
+  // ------------------------------------------------------------ facilities
+  listFacilities: (params: {
+    campusIds?: number[];
+    collegeIds?: number[];
+    faculty?: string;
+    activeOnly?: boolean;
+  } = {}) =>
+    request<ApiFacility[]>(
+      `/reference/facilities${query({
+        campus_ids: params.campusIds,
+        college_ids: params.collegeIds,
+        faculty: params.faculty,
+        active_only: params.activeOnly,
+      })}`,
+    ),
+
+  /** Rooms allowed to host a qualification on a weekday (faculty + availability). */
+  listEligibleFacilities: (params: {
+    qualificationCode: string;
+    weekday: string;
+    campusId?: number;
+    collegeId?: number;
+  }) =>
+    request<ApiFacility[]>(
+      `/reference/facilities/eligible${query({
+        qualification_code: params.qualificationCode,
+        weekday: params.weekday,
+        campus_id: params.campusId,
+        college_id: params.collegeId,
+      })}`,
+    ),
+
   // -- College -------------------------------------------------------------
   listColleges: (params: { search?: string; activeOnly?: boolean } = {}) =>
     request<ApiCollege[]>(
