@@ -8,6 +8,7 @@ import { FilterBar, FilterField } from '@/components/common/filter-bar';
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
 import { EmptyState, ErrorState } from '@/components/common/states';
+import { SuggestionIndicator } from '@/features/shared/suggestion-indicator';
 import { ExportMenu } from '@/components/common/export-menu';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useCascadingFilters } from './use-cascading-filters';
@@ -224,6 +225,8 @@ export function FacilityDataPanel() {
           setFaculty('');
         }}
         trailing={
+          <>
+          <SuggestionIndicator entityTypes={['FACILITY']} />
           <ExportMenu
             rows={visible}
             baseFileName={`tdms-facility-data-${today()}`}
@@ -250,6 +253,7 @@ export function FacilityDataPanel() {
               },
             ]}
           />
+          </>
         }
       >
         <FilterField label="College" htmlFor="facility-college">

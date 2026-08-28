@@ -94,7 +94,9 @@ def truncate_all(engine) -> None:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE TABLE access_requests, user_activity_records, users "
+                "TRUNCATE TABLE access_requests, user_activity_records, users, "
+                "allocation_source_row, allocation_import_batch, allocation_delivery_intake, "
+                "allocation_session, allocation_delivery, reference_suggestion "
                 "RESTART IDENTITY CASCADE"
             )
         )

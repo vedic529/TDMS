@@ -3,11 +3,19 @@
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { AlertCircle, CheckCircle2, Eye, FilePlus2, Loader2, Save, Search, Trash2, UserRoundSearch } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Eye, Save } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -27,29 +35,17 @@ import { ValidationPanel } from '@/components/common/validation-panel';
 import { ConfirmationDialog } from '@/components/common/confirmation-dialog';
 import { ChangeSummaryDialog, buildChanges } from '@/components/common/change-summary-dialog';
 import { DeleteConfirmationDialog } from '@/components/common/delete-confirmation-dialog';
-import { EmptyState, PendingRuleNotice, ReadOnlyNotice } from '@/components/common/states';
+import { ReadOnlyNotice } from '@/components/common/states';
 import { useReferenceData } from '@/features/shared/reference-data-context';
 import { useAuth } from '@/features/auth/auth-context';
-import { getTdmsClient } from '@/services';
+import { studentsApi, type StudentInput, type StudentRecord } from '@/services/students-api';
 import { INTERFACE_NAMES } from '@/lib/interface-names';
 import { readOnlyReason } from '@/lib/permissions';
 import { formatDate, nowIso } from '@/lib/format';
-import {
-  NO_GROUP,
-  deriveActualCourseDuration,
-  deriveCollegeEmail,
-  deriveIntake,
-  deriveIntakeDate,
-  deriveState,
-  groupAfterQualificationChange,
-  groupOptionsFor,
-  usesNumberedGroups,
-  validateGroup,
-} from '@/lib/student-rules';
+import { deriveActualCourseDuration, deriveCollegeEmail, deriveState } from '@/lib/student-rules';
 import { COUNTRY_OPTIONS } from '@/mock-data';
 import { COE_OPTIONS, YES_NO_OPTIONS, studentFormSchema, type StudentFormValues } from './student-fields';
 import type { ValidationIssue, ValidationResult, ReasonCode } from '@/types/common';
-import type { StudentInput, StudentRecord } from '@/types/student';
 
 const EMPTY_FORM: StudentFormValues = {
   collegeId: '',
@@ -62,7 +58,6 @@ const EMPTY_FORM: StudentFormValues = {
   proposedStartDate: '',
   proposedEndDate: '',
   qualificationTitle: '',
-  group: '',
   courseDurationOption: '',
   ctStudent: 'No',
   personalEmail: '',
@@ -71,15 +66,29 @@ const EMPTY_FORM: StudentFormValues = {
   remarks: '',
 };
 
-export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: string }) {
+/**
+ * Single Student Entry — create or edit one record, in a popup.
+ *
+ * The form is a dialog rather than a section of the page, so the records list
+ * behind it keeps its place and its scroll position. `student` decides the
+ * mode: a record edits it, `null` starts a new one.
+ */
+export function SingleStudentEntry({
+  open,
+  onOpenChange,
+  student = null,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  student?: StudentRecord | null;
+  onSaved?: () => void;
+}) {
   const { user, permissions } = useAuth();
   const { data, campusesForCollege, offeringsFor, collegeById, campusById } = useReferenceData();
 
   const [mode, setMode] = React.useState<'idle' | 'create' | 'edit'>('idle');
   const [record, setRecord] = React.useState<StudentRecord | null>(null);
-  const [searchTerm, setSearchTerm] = React.useState(initialStudentId ?? '');
-  const [searching, setSearching] = React.useState(false);
-  const [searchMessage, setSearchMessage] = React.useState<string | null>(null);
 
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [validation, setValidation] = React.useState<ValidationResult | null>(null);
@@ -105,11 +114,12 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
   const campus = campusById(values.campusId);
 
   // SRS 6.3 generated values (SST-03).
+  //
+  // Intake and Group are **not** here: they are worked out by the API from the
+  // rolling timetable when the record is saved (rule 1.3), so the form shows
+  // what was assigned rather than guessing at it locally.
   const generated = React.useMemo(
     () => ({
-      // Displayed as DD-MMM-YYYY; stored as an ISO date.
-      intake: deriveIntake(values.proposedStartDate),
-      intakeDate: deriveIntakeDate(values.proposedStartDate),
       qualificationCode: offering?.qualificationCode ?? '',
       state: deriveState(campus),
       // OD-08 approved: inclusive date calculation.
@@ -118,27 +128,33 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     [values.proposedStartDate, values.proposedEndDate, offering, campus],
   );
 
-  // ------------------------------------------------------------------ Group
-  const qualificationCode = offering?.qualificationCode ?? '';
-  const groupIsSelectable = usesNumberedGroups(qualificationCode);
-  const groupOptions = groupOptionsFor(qualificationCode);
-  const groupError = qualificationCode ? validateGroup(qualificationCode, values.group) : null;
-
   /**
-   * Keep Group consistent with the chosen qualification.
+   * The Intake and Group the system assigned, as text for the read-only fields.
    *
-   * Without this, switching SIT40721 (Group 5) to BSB50420 would leave "Group 5"
-   * on a qualification that has no groups, and switching back would leave "N/A"
-   * in a field that now needs a real choice. Neither stale value should ever
-   * reach the preview, let alone the save.
+   * Before a save there is nothing to show — the assignment happens against the
+   * rolling timetable on the server — so the field says so instead of inventing
+   * a value.
    */
-  React.useEffect(() => {
-    if (!qualificationCode) return;
-    const next = groupAfterQualificationChange(qualificationCode, values.group);
-    if (next !== values.group) {
-      form.setValue('group', next, { shouldDirty: true, shouldValidate: false });
+  const assigned = React.useMemo(() => {
+    if (!record) {
+      return {
+        intake: 'Assigned on save from the rolling timetable',
+        group: 'Read from the assigned intake',
+        note: null as string | null,
+      };
     }
-  }, [qualificationCode, values.group, form]);
+    if (record.intake_match_status === 'NOT_APPLICABLE') {
+      return { intake: 'N/A', group: 'N/A', note: 'A Credit Transfer student has no intake or group.' };
+    }
+    if (record.intake_match_status === 'TBD' || !record.intake_label) {
+      return {
+        intake: 'TBD',
+        group: '—',
+        note: 'No rolling timetable has been supplied for this qualification and duration, so no intake could be assigned.',
+      };
+    }
+    return { intake: record.intake_label, group: record.group_code ?? 'NA', note: null };
+  }, [record]);
 
   // College Email is generated but editable; it regenerates while untouched.
   React.useEffect(() => {
@@ -150,7 +166,13 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     }
   }, [values.studentId, values.collegeEmail, college, mode, form]);
 
-  // Mock duplicate Student ID check (SST-05 / DATA-01).
+  /**
+   * Live duplicate Student ID check (SST-05 / DATA-01).
+   *
+   * A Student ID may legitimately appear more than once now — one person can
+   * hold two enrolments — so this warns only about a clash with an **active**
+   * record other than the one being edited. The database has the final say.
+   */
   React.useEffect(() => {
     const studentId = values.studentId.trim();
     if (!studentId) {
@@ -159,10 +181,20 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      void getTdmsClient()
-        .isStudentIdAvailable(studentId, record?.id)
-        .then((available) => {
-          if (!cancelled) setDuplicateState(available ? 'available' : 'duplicate');
+      void studentsApi
+        .list({ search: studentId, limit: 20 })
+        .then((page) => {
+          if (cancelled) return;
+          const clash = page.items.some(
+            (item) =>
+              item.student_id.toUpperCase() === studentId.toUpperCase() &&
+              item.status === 'ACTIVE' &&
+              item.id !== record?.id,
+          );
+          setDuplicateState(clash ? 'duplicate' : 'available');
+        })
+        .catch(() => {
+          if (!cancelled) setDuplicateState('unknown');
         });
     }, 250);
     return () => {
@@ -171,82 +203,84 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     };
   }, [values.studentId, record?.id]);
 
-  const search = React.useCallback(
-    async (term: string) => {
-      const studentId = term.trim();
-      if (!studentId) return;
-      setSearching(true);
-      setSearchMessage(null);
-      try {
-        const found = await getTdmsClient().findStudentByStudentId(studentId);
-        if (!found) {
-          setSearchMessage(`No student was found with Student ID "${studentId}".`);
-          return;
-        }
-        setRecord(found);
-        setMode('edit');
-        form.reset({
-          collegeId: found.collegeId,
-          campusId: found.campusId,
-          collegeEmail: found.collegeEmail,
-          firstName: found.firstName,
-          lastName: found.lastName,
-          studentId: found.studentId,
-          coeStatus: found.coeStatus,
-          proposedStartDate: found.proposedStartDate,
-          proposedEndDate: found.proposedEndDate,
-          qualificationTitle: found.qualificationTitle,
-          // The saved Group, so editing a record does not silently clear it.
-          group: found.group,
-          courseDurationOption: found.courseDurationOption ? String(found.courseDurationOption) : '',
-          ctStudent: found.ctStudent,
-          personalEmail: found.personalEmail,
-          primaryPhone: found.primaryPhone,
-          primaryCountry: found.primaryCountry,
-          remarks: found.remarks,
-        });
-      } finally {
-        setSearching(false);
-      }
+  /**
+   * Fill the form from a stored record.
+   *
+   * The record carries approved *names*; the form works in reference ids, so
+   * the ids are resolved back from the reference data.
+   */
+  const resetFromRecord = React.useCallback(
+    (found: StudentRecord) => {
+      const foundCollege = (data?.colleges ?? []).find(
+        (item) => item.collegeShortName === found.college || item.collegeFullName === found.college,
+      );
+      const foundCampus = (data?.campuses ?? []).find((item) => item.campusName === found.campus);
+      form.reset({
+          collegeId: foundCollege?.id ?? '',
+          campusId: foundCampus?.id ?? '',
+          collegeEmail: found.college_email,
+          firstName: found.first_name,
+          lastName: found.last_name ?? '',
+          studentId: found.student_id,
+          coeStatus: found.coe_status === 'COE' ? 'CoE' : 'Non-CoE',
+          proposedStartDate: found.proposed_start_date,
+          proposedEndDate: found.proposed_end_date,
+          qualificationTitle: found.qualification_title,
+          courseDurationOption: found.course_duration_option_weeks
+            ? String(found.course_duration_option_weeks)
+            : '',
+          ctStudent: found.ct_student ? 'Yes' : 'No',
+          personalEmail: found.personal_email ?? '',
+          primaryPhone: found.primary_phone ?? '',
+        primaryCountry: '',
+        remarks: found.remarks ?? '',
+      });
     },
-    [form],
+    [form, data],
   );
 
+  /** Open in the right mode: a supplied record edits it, nothing creates one. */
   React.useEffect(() => {
-    if (initialStudentId) void search(initialStudentId);
-  }, [initialStudentId, search]);
+    if (!open) return;
+    if (student) {
+      setRecord(student);
+      setMode('edit');
+      resetFromRecord(student);
+    } else {
+      setRecord(null);
+      setMode('create');
+      form.reset(EMPTY_FORM);
+    }
+  }, [open, student, resetFromRecord, form]);
 
-  function startCreate() {
-    setRecord(null);
-    setMode('create');
-    setSearchMessage(null);
-    form.reset(EMPTY_FORM);
-  }
-
+  /**
+   * The payload for the API.
+   *
+   * Intake, Group, Qualification Code, State and Actual Course Duration are
+   * absent by design: the API derives every one of them, so sending a local
+   * guess could only ever disagree with it.
+   */
   function buildInput(): StudentInput {
     return {
-      group: values.group || NO_GROUP,
-      intake: generated.intakeDate,
-      collegeId: values.collegeId,
-      campusId: values.campusId,
-      collegeEmail: values.collegeEmail,
-      firstName: values.firstName,
-      lastName: values.lastName,
-      studentId: values.studentId.trim(),
-      coeStatus: values.coeStatus,
-      proposedStartDate: values.proposedStartDate,
-      proposedEndDate: values.proposedEndDate,
-      actualCourseDuration: generated.actualCourseDuration,
+      student_id: values.studentId.trim(),
+      first_name: values.firstName,
+      last_name: values.lastName || null,
+      college_id: Number(values.collegeId),
+      campus_id: Number(values.campusId),
+      qualification_code: generated.qualificationCode || null,
+      coe_status: values.coeStatus === 'CoE' ? 'COE' : 'NON_COE',
+      ct_student: values.ctStudent === 'Yes',
+      proposed_start_date: values.proposedStartDate,
+      proposed_end_date: values.proposedEndDate,
+      personal_email: values.personalEmail || null,
+      primary_phone: values.primaryPhone || null,
+      status: record?.status ?? 'ACTIVE',
+      college_email: values.collegeEmail || null,
+      remarks: values.remarks || null,
       // OD-08 approved: staff select the approved option; TDMS derives nothing.
-      courseDurationOption: values.courseDurationOption ? Number(values.courseDurationOption) : null,
-      qualificationTitle: values.qualificationTitle,
-      qualificationCode: generated.qualificationCode,
-      ctStudent: values.ctStudent,
-      personalEmail: values.personalEmail,
-      primaryPhone: values.primaryPhone,
-      state: generated.state,
-      primaryCountry: values.primaryCountry,
-      remarks: values.remarks,
+      course_duration_option_weeks: values.courseDurationOption
+        ? Number(values.courseDurationOption)
+        : null,
     };
   }
 
@@ -276,19 +310,6 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
       });
     }
 
-    // Approved 11 August 2026: Group must match the qualification. Blocking,
-    // because the API refuses the save otherwise and a "preview looked fine"
-    // followed by a server rejection is a worse experience than saying so here.
-    if (groupError) {
-      issues.push({
-        id: 'student-group',
-        severity: 'blocking',
-        title: groupIsSelectable ? 'Select a Group' : 'Group must be N/A',
-        message: groupError,
-        reference: 'Group',
-      });
-    }
-
     // OD-08 approved: the Course Duration Option must be one of the approved
     // options for the selected offering when a value is chosen.
     const approvedOptions = offering?.durationOptions ?? [];
@@ -314,24 +335,25 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     if (!user || !validation?.canSave) return;
     setBusy(true);
     try {
-      const client = getTdmsClient();
       const input = buildInput();
       if (mode === 'edit' && record) {
-        const updated = await client.updateStudent(record.id, input, { actor: user });
+        const updated = await studentsApi.update(record.id, input);
         setRecord(updated);
         toast.success('Student record updated', {
-          description: `${updated.studentId} was updated and a user activity record was created.`,
+          description: `${updated.student_id} was updated and a user activity record was created.`,
         });
       } else {
-        const created = await client.createStudent(input, { actor: user });
+        const created = await studentsApi.create(input);
         setRecord(created);
         setMode('edit');
         toast.success('Student record created', {
-          description: `${created.studentId} was created and a user activity record was created.`,
+          description: `${created.student_id} was created and a user activity record was created.`,
         });
       }
       setConfirmOpen(false);
       setPreviewOpen(false);
+      onSaved?.();
+      onOpenChange(false);
     } catch (error) {
       toast.error('The student record could not be saved', {
         description: error instanceof Error ? error.message : 'Try again, or contact the TDMS administrator.',
@@ -345,14 +367,15 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
     if (!record || !user) return;
     setBusy(true);
     try {
-      await getTdmsClient().deleteStudent(record.id, { reason, reasonDetail }, { actor: user });
+      await studentsApi.remove(record.id, reason, reasonDetail);
       toast.success('Student record moved to the recycle area', {
-        description: `${record.studentId} was removed from active use. A user activity record was created.`,
+        description: `${record.student_id} was removed from active use. A user activity record was created.`,
       });
       setDeleteOpen(false);
       setRecord(null);
-      setMode('idle');
       form.reset(EMPTY_FORM);
+      onSaved?.();
+      onOpenChange(false);
     } finally {
       setBusy(false);
     }
@@ -391,119 +414,28 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
   const errors = form.formState.errors;
 
   return (
-    <div className="space-y-5">
-      {!canChange && <ReadOnlyNotice message={readOnlyReason(user, INTERFACE_NAMES.singleStudentEntry)} />}
+    <>
+      {/*
+        `DialogContent` lays itself out as header / scrolling body / footer, so
+        the title stays put and the actions stay reachable however long the form
+        is. Only the body scrolls.
+      */}
+      <Dialog open={open} onOpenChange={busy ? undefined : onOpenChange}>
+        <DialogContent size="full">
+          <DialogHeader>
+            <DialogTitle>{mode === 'edit' ? `Student record ${record?.student_id}` : 'New student record'}</DialogTitle>
+            <DialogDescription>
+              {mode === 'edit'
+                ? 'Change the values you need, then preview the changes before confirming the update.'
+                : 'Complete the form, then preview the record before confirming the save.'}
+            </DialogDescription>
+          </DialogHeader>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Find or create a student record</CardTitle>
-          <CardDescription>
-            Search an existing Student ID to view or edit it, or start a new record.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-end">
-          <div className="flex-1 space-y-1.5">
-            <label htmlFor="student-search" className="text-[13px] font-medium">
-              Search Student ID
-            </label>
-            <div className="flex gap-2">
-              <Input
-                id="student-search"
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') void search(searchTerm);
-                }}
-                placeholder="e.g. ST20261001"
-              />
-              <Button variant="outline" onClick={() => void search(searchTerm)} disabled={searching}>
-                {searching ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Search aria-hidden="true" />}
-                Search
-              </Button>
-            </div>
-          </div>
-          {canChange && (
-            <Button onClick={startCreate}>
-              <FilePlus2 aria-hidden="true" />
-              Create New Student
-            </Button>
-          )}
-        </CardContent>
-      </Card>
-
-      {searchMessage && (
-        <Alert variant="warning">
-          <AlertCircle aria-hidden="true" />
-          <AlertDescription>{searchMessage}</AlertDescription>
-        </Alert>
-      )}
-
-      {mode === 'idle' ? (
-        <EmptyState
-          title="No student record is open"
-          description="Search for a Student ID, or select Create New Student to enter a new record."
-          icon={UserRoundSearch}
-        />
-      ) : (
-        <Card>
-          <CardHeader className="flex-row items-start justify-between gap-4">
-            <div>
-              <CardTitle>{mode === 'edit' ? `Student record ${record?.studentId}` : 'New student record'}</CardTitle>
-              <CardDescription>
-                {mode === 'edit'
-                  ? 'Change the values you need, then preview the changes before confirming the update.'
-                  : 'Complete the form, then preview the record before confirming the save.'}
-              </CardDescription>
-            </div>
-            {mode === 'edit' && record && permissions.maintainStudentData && (
-              <Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)}>
-                <Trash2 aria-hidden="true" />
-                Delete
-              </Button>
-            )}
-          </CardHeader>
-
-          <CardContent className="space-y-8">
+          <DialogBody className="space-y-6">
+            {!canChange && <ReadOnlyNotice message={readOnlyReason(user, INTERFACE_NAMES.singleStudentEntry)} />}
             <fieldset disabled={!canChange} className="space-y-8">
               <FormSection title="Identification and college">
                 <FormGrid columns={3}>
-                  <FormField
-                    label="Group"
-                    htmlFor="student-group"
-                    required
-                    error={form.formState.errors.group?.message ?? groupError ?? undefined}
-                    hint={
-                      groupIsSelectable
-                        ? `This qualification uses numbered groups. Choose ${groupOptions[0]} to ${groupOptions[groupOptions.length - 1]}.`
-                        : 'This qualification does not use numbered groups.'
-                    }
-                  >
-                    {groupIsSelectable ? (
-                      <SimpleSelect
-                        id="student-group"
-                        value={values.group}
-                        onChange={(next) => form.setValue('group', next, { shouldDirty: true })}
-                        placeholder="Select a group"
-                        options={groupOptions.map((option) => ({ value: option, label: option }))}
-                      />
-                    ) : (
-                      /* Not a disabled dropdown: there is nothing to choose, and
-                         a dropdown with one option invites the user to look for
-                         others that do not exist. */
-                      <Input id="student-group" value={NO_GROUP} readOnly />
-                    )}
-                  </FormField>
-
-                  <FormField
-                    label="Intake"
-                    htmlFor="student-intake"
-                    required
-                    generated
-                    hint="Generated from the proposed start date."
-                  >
-                    <Input id="student-intake" value={generated.intake} readOnly placeholder="Generated after selection" />
-                  </FormField>
-
                   <FormField label="College" htmlFor="student-college" required error={errors.collegeId?.message}>
                     <DependentSelect
                       id="student-college"
@@ -734,29 +666,49 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
                   <Textarea id="student-remarks" {...form.register('remarks')} />
                 </FormField>
               </FormSection>
-            </fieldset>
 
+              {/*
+                Assigned by the system, not entered. Kept at the end and clearly
+                separated: putting read-only values among the inputs invites the
+                user to try to type in them (rule 1.3).
+              */}
+              <FormSection title="Assigned by the system">
+                <FormGrid columns={2}>
+                  <FormField
+                    label="Intake"
+                    htmlFor="student-intake"
+                    generated
+                    hint={assigned.note ?? 'Assigned from the rolling timetable using the proposed start date.'}
+                  >
+                    <Input id="student-intake" value={assigned.intake} readOnly className="bg-muted/50" />
+                  </FormField>
+
+                  <FormField
+                    label="Group"
+                    htmlFor="student-group"
+                    generated
+                    hint="Read from the assigned intake. It is never chosen separately."
+                  >
+                    <Input id="student-group" value={assigned.group} readOnly className="bg-muted/50" />
+                  </FormField>
+                </FormGrid>
+              </FormSection>
+            </fieldset>
+          </DialogBody>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              {canChange ? 'Cancel' : 'Close'}
+            </Button>
             {canChange && (
-              <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setMode('idle');
-                    setRecord(null);
-                    form.reset(EMPTY_FORM);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button onClick={() => void runPreview()}>
-                  <Eye aria-hidden="true" />
-                  {mode === 'edit' ? 'Preview Changes' : 'Preview Student'}
-                </Button>
-              </div>
+              <Button onClick={() => void runPreview()}>
+                <Eye aria-hidden="true" />
+                {mode === 'edit' ? 'Preview Changes' : 'Preview Student'}
+              </Button>
             )}
-          </CardContent>
-        </Card>
-      )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Preview: shows the complete proposed record and every validation message
           without saving (SST-04). */}
@@ -769,17 +721,13 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
             </SheetDescription>
           </SheetHeader>
           <SheetBody className="space-y-6">
-            <PendingRuleNotice
-              decisionId="OD-08"
-              message="Intake and Group use provisional prototype rules because the approved generation rules have not been supplied yet. Actual Course Duration uses the approved inclusive calculation."
-            />
             <PreviewPanel
               groups={[
                 {
                   title: 'Identification and college',
                   items: [
-                    { label: 'Group', value: values.group || NO_GROUP },
-                    { label: 'Intake', value: generated.intake, generated: true },
+                    { label: 'Intake', value: assigned.intake, generated: true },
+                    { label: 'Group', value: assigned.group, generated: true },
                     { label: 'College', value: college?.collegeFullName ?? '' },
                     { label: 'Campus', value: campus ? `${campus.campusName} — ${campus.campusLocation}` : '' },
                     { label: 'College Email', value: values.collegeEmail },
@@ -846,9 +794,9 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
           title="Update Student Record?"
           description="Check the record and the fields that will change, then confirm the update."
           record={{
-            primary: record.studentId,
-            secondary: `${record.firstName} ${record.lastName}`.trim(),
-            lines: [`${record.qualificationCode} — ${record.qualificationTitle}`],
+            primary: record.student_id,
+            secondary: `${record.first_name} ${record.last_name ?? ''}`.trim(),
+            lines: [`${record.qualification_code} — ${record.qualification_title}`],
           }}
           changes={changes}
           busy={busy}
@@ -878,8 +826,8 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
               <dd className="font-medium">{generated.qualificationCode}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="w-32 text-muted-foreground">Group:</dt>
-              <dd className="font-medium">{values.group || '—'}</dd>
+              <dt className="w-32 text-muted-foreground">Intake:</dt>
+              <dd className="font-medium">Assigned on save from the rolling timetable</dd>
             </div>
           </dl>
         </ConfirmationDialog>
@@ -893,16 +841,16 @@ export function SingleStudentEntry({ initialStudentId }: { initialStudentId?: st
           reasonContext="student"
           busy={busy}
           record={{
-            primary: record.studentId,
-            secondary: `${record.firstName} ${record.lastName}`.trim(),
+            primary: record.student_id,
+            secondary: `${record.first_name} ${record.last_name ?? ''}`.trim(),
             lines: [
-              `${record.qualificationCode} — ${record.qualificationTitle}`,
-              `Current status: Active · ${record.group || 'No group'}`,
+              `${record.qualification_code} — ${record.qualification_title}`,
+              `Current status: ${record.status.replace(/_/g, ' ')} · ${record.group_code || 'No group'}`,
             ],
           }}
           onConfirm={confirmDelete}
         />
       )}
-    </div>
+    </>
   );
 }

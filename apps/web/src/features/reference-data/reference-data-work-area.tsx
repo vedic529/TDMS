@@ -18,8 +18,9 @@ import { ExportMenu } from '@/components/common/export-menu';
 import { DeleteConfirmationDialog } from '@/components/common/delete-confirmation-dialog';
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { CourseFormDrawer } from './course-form-drawer';
-import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
 import { FacilityDataPanel } from './facility-data-panel';
+import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
+import { SuggestionIndicator } from '@/features/shared/suggestion-indicator';
 import { useReferenceLookups } from './use-reference-lookups';
 import { useCascadingFilters } from './use-cascading-filters';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
@@ -302,6 +303,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         }}
         trailing={
           <>
+            <SuggestionIndicator entityTypes={['COLLEGE', 'CAMPUS']} onResolved={() => void load()} />
             <ExportMenu
               rows={rows}
               baseFileName={`tdms-course-data-${today()}`}
@@ -697,6 +699,7 @@ function QualificationUnitPanel() {
         }}
         trailing={
           <>
+            <SuggestionIndicator entityTypes={['QUALIFICATION', 'UNIT']} onResolved={() => void load()} />
             <ExportMenu
               rows={rows}
               baseFileName={`tdms-qualification-unit-sequence-${today()}`}

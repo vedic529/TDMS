@@ -63,7 +63,7 @@ export function DependentSelect({
 
   return (
     <div className="space-y-1">
-      <Select value={value} onValueChange={onChange} disabled={isDisabled || !hasOptions}>
+      <Select value={value || undefined} onValueChange={onChange} disabled={isDisabled || !hasOptions}>
         <SelectTrigger id={id} {...aria}>
           <SelectValue placeholder={requires ? `Select ${requires} first` : placeholder} />
         </SelectTrigger>
@@ -93,16 +93,18 @@ export function SimpleSelect({
   ...aria
 }: Omit<DependentSelectProps, 'requires' | 'emptyMessage'>) {
   return (
-    <Select value={value} onValueChange={onChange} disabled={disabled}>
+    <Select value={value || undefined} onValueChange={onChange} disabled={disabled}>
       <SelectTrigger id={id} {...aria}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>
-        {distinct(options).map((option) => (
-          <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
-            {option.label}
-          </SelectItem>
-        ))}
+        {distinct(options)
+          .filter((option) => option.value !== '')
+          .map((option) => (
+            <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+              {option.label}
+            </SelectItem>
+          ))}
       </SelectContent>
     </Select>
   );

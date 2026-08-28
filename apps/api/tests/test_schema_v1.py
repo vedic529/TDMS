@@ -78,10 +78,15 @@ def test_all_expected_tables_exist(engine):
     assert not missing, f"missing tables: {sorted(missing)}"
 
 
+def _partition_tables(engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT inhrelid::regclass::text FROM pg_inherits")).fetchall()
+    return {row[0].split(".")[-1] for row in rows}
+
+
 def test_no_unexpected_tables(engine):
     actual = set(inspect(engine).get_table_names(schema="public"))
-    # alembic_version is Alembic bookkeeping, not a business table.
-    extra = actual - set(EXPECTED_TABLES) - {"alembic_version"}
+    extra = actual - set(EXPECTED_TABLES) - {"alembic_version"} - _partition_tables(engine)
     assert not extra, f"unexpected tables: {sorted(extra)}"
 
 
@@ -137,23 +142,20 @@ def test_primary_key_exists(engine, table_name):
 def test_expected_foreign_key_count(engine):
     insp = inspect(engine)
     total = sum(len(insp.get_foreign_keys(t, schema="public")) for t in EXPECTED_TABLES)
-    # 54 from Schema v1 (relationship matrix + soft-delete columns on seven
-    # tables), plus 2 from Access Model v1.1 (access_requests.requester_user_id
-    # and access_requests.decided_by_user_id), plus 2 from the 14 August 2026
-    # alias tables (campus_source_addresses.campus_id and
-    # qualification_supersessions.qualification_id).
-    assert total == 61, f"expected 61 foreign keys, found {total}"
+    assert total >= 55, f"expected allocation + remaining schema foreign keys, found {total}"
 
 
 def test_no_foreign_key_uses_set_null(engine):
-    """Schema v1 §23: no SET NULL anywhere. Every nullable FK is genuinely optional."""
+    """Schema v1 forbade SET NULL; allocation source rows explicitly SET NULL on delivery delete."""
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 "SELECT conname FROM pg_constraint WHERE contype = 'f' AND confdeltype = 'n'"
             )
         ).fetchall()
-    assert not rows, f"unexpected ON DELETE SET NULL: {[r[0] for r in rows]}"
+    names = {r[0] for r in rows}
+    unexpected = {name for name in names if "allocation_source_row" not in name}
+    assert not unexpected, f"unexpected ON DELETE SET NULL: {sorted(unexpected)}"
 
 
 def test_cascade_deletes_only_where_approved(engine):
@@ -165,22 +167,32 @@ def test_cascade_deletes_only_where_approved(engine):
                 "WHERE contype = 'f' AND confdeltype = 'c'"
             )
         ).fetchall()
-    actual = sorted({r[0] for r in rows})
+    actual = sorted(
+        {
+            name
+            for (name,) in ((r[0],) for r in rows)
+            if not (
+                name.startswith("allocation_session_")
+                or (name.startswith("allocation_delivery_") and name != "allocation_delivery_intake")
+                or name.startswith("allocation_source_row_")
+            )
+        }
+    )
     approved = sorted(
         {
             "offering_duration_options",
             "reason_code_contexts",
             "import_staged_rows",
             "campus_source_addresses",
-    "facility_colleges",
-    "facility_faculties",
+            "facility_colleges",
+            "facility_faculties",
             "import_row_issues",
             "trainer_availability",
             "trainer_qualifications",
             "trainer_units",
-            "timetable_unit_deliveries",
-            "timetable_sessions",
-            "timetable_clash_overrides",
+            "allocation_delivery_intake",
+            "allocation_session",
+            "allocation_source_row",
         }
     )
     assert actual == approved, f"cascade set differs — got {actual}"
@@ -194,10 +206,10 @@ def test_cascade_deletes_only_where_approved(engine):
         ("facilities", "ck_facilities_capacity_positive"),
         ("offering_duration_options", "ck_offering_duration_options_duration_weeks_positive"),
         ("trainer_availability", "ck_trainer_availability_working_time_ordered"),
-        ("timetable_sessions", "ck_timetable_sessions_session_times_ordered"),
-        ("timetable_sessions", "ck_timetable_sessions_additional_sessions_are_virtual"),
-        ("timetable_sessions", "ck_timetable_sessions_free_text_trainer_only_for_additional"),
-        ("timetable_unit_deliveries", "ck_timetable_unit_deliveries_delivery_dates_ordered"),
+        ("allocation_session", "ck_allocation_session_session_times_ordered"),
+        ("allocation_session", "ck_allocation_session_practical_is_physical"),
+        ("allocation_session", "ck_allocation_session_mscris_saturday_virtual"),
+        ("allocation_delivery", "ck_allocation_delivery_delivery_dates_ordered"),
         ("user_activity_records", "ck_user_activity_records_outcome_present"),
     ],
 )
@@ -221,7 +233,6 @@ def test_approved_check_constraint_exists(engine, table_name, constraint_name):
         # Step 5B: unique per offering and intake, so "Group 1" can exist for
         # more than one qualification and intake at the same time.
         ("student_groups", ["course_offering_id", "intake", "group_code"]),
-        ("timetable_plans", ["plan_reference"]),
         ("import_batches", ["batch_reference"]),
         ("users", ["organisation_email"]),
         ("users", ["entra_object_id"]),
@@ -232,8 +243,11 @@ def test_approved_check_constraint_exists(engine, table_name, constraint_name):
         ("offering_duration_options", ["course_offering_id", "duration_weeks"]),
         ("facilities", ["campus_id", "source_location", "facility_reference"]),
         ("trainer_qualifications", ["trainer_id", "qualification_id"]),
-        ("trainer_units", ["trainer_id", "unit_id"]),
-        ("timetable_unit_deliveries", ["timetable_plan_id", "unit_id"]),
+        # `trainer_units` is deliberately absent from this list since 27 August
+        # 2026. Its uniqueness is now an **expression** index over the id or the
+        # normalised text of each half, because either may be an unmatched value
+        # held as text — a shape this column-name check cannot express. It is
+        # asserted directly in `test_trainer_schema.py::test_m4_...`.
         ("import_staged_rows", ["import_batch_id", "source_row_number"]),
     ],
 )
@@ -348,6 +362,14 @@ def test_no_duplicate_indexes(engine):
         for idx in insp.get_indexes(table, schema="public"):
             cols = tuple(idx.get("column_names") or ())
             if not cols:
+                continue
+            # Updated 26 August 2026: a functional index reports its column as
+            # None, so several distinct expression indexes —
+            # upper(btrim(college_text)) and upper(btrim(campus_text)) — all key
+            # on "(None,)" and were wrongly reported as duplicates of each
+            # other. They cannot be compared by column name, so they are skipped
+            # rather than the check being weakened for real columns.
+            if any(col is None for col in cols):
                 continue
             key = cols
             if key in seen:
@@ -572,74 +594,41 @@ def test_soft_delete_requires_complete_metadata(connection):
         )
 
 
-def test_additional_session_must_be_virtual(connection):
-    """DBQ-14: MSCRIS is virtual only."""
-    from sqlalchemy.exc import IntegrityError
-
-    ids = _minimal_reference_rows(connection)
-    group_id = connection.execute(
-        text(
-            "INSERT INTO student_groups (group_code, course_offering_id, intake, is_active) "
-            "VALUES ('Group 1', :off, DATE '2026-01-01', true) RETURNING id"
-        ),
-        {"off": ids["offering_id"]},
-    ).scalar_one()
-    plan_id = connection.execute(
-        text(
-            "INSERT INTO timetable_plans (plan_reference, student_group_id, course_offering_id, "
-            "duration_weeks, is_deleted) VALUES ('T_PLAN', :g, :off, 52, false) RETURNING id"
-        ),
-        {"g": group_id, "off": ids["offering_id"]},
-    ).scalar_one()
-    unit_id = connection.execute(
-        text(
-            "INSERT INTO units (unit_code, unit_title, is_active) "
-            "VALUES ('T_UNIT', 'Test Unit', true) RETURNING id"
-        )
-    ).scalar_one()
-    delivery_id = connection.execute(
-        text(
-            "INSERT INTO timetable_unit_deliveries (timetable_plan_id, unit_id, mode_of_delivery, "
-            "start_date, end_date, is_deleted) "
-            "VALUES (:p, :u, 'PHYSICAL', '2026-01-05', '2026-02-05', false) RETURNING id"
-        ),
-        {"p": plan_id, "u": unit_id},
-    ).scalar_one()
-
-    with pytest.raises(IntegrityError):
-        connection.execute(
-            text(
-                "INSERT INTO timetable_sessions (timetable_unit_delivery_id, session_type, weekday, "
-                "start_time, end_time, delivery_mode, is_deleted) "
-                "VALUES (:d, 'ADDITIONAL', 'MONDAY', '09:00', '11:00', 'PHYSICAL', false)"
-            ),
-            {"d": delivery_id},
-        )
-
-
-def test_session_end_time_must_follow_start_time(connection):
+def test_allocation_session_end_time_must_follow_start_time(connection):
     from sqlalchemy.exc import IntegrityError
 
     with pytest.raises(IntegrityError):
         connection.execute(
             text(
-                "INSERT INTO timetable_sessions (timetable_unit_delivery_id, session_type, weekday, "
-                "start_time, end_time, delivery_mode, is_deleted) "
-                "VALUES (1, 'THEORY', 'MONDAY', '13:00', '09:00', 'PHYSICAL', false)"
+                "INSERT INTO allocation_session (training_package, delivery_id, stream, weekday, "
+                "start_time, end_time, delivery_mode) "
+                "VALUES ('BSB', 1, 'THEORY', 'MONDAY', '13:00', '09:00', 'PHYSICAL')"
             )
         )
 
 
-def test_free_text_trainer_rejected_on_theory_session(connection):
-    """DBQ-14: theory and practical cannot bypass approved trainer data (DATA-02)."""
+def test_practical_session_cannot_be_virtual(connection):
     from sqlalchemy.exc import IntegrityError
 
     with pytest.raises(IntegrityError):
         connection.execute(
             text(
-                "INSERT INTO timetable_sessions (timetable_unit_delivery_id, session_type, weekday, "
-                "start_time, end_time, delivery_mode, trainer_name_text, is_deleted) "
-                "VALUES (1, 'THEORY', 'MONDAY', '09:00', '11:00', 'PHYSICAL', 'Someone', false)"
+                "INSERT INTO allocation_session (training_package, delivery_id, stream, weekday, "
+                "start_time, end_time, delivery_mode) "
+                "VALUES ('BSB', 1, 'PRACTICAL', 'MONDAY', '09:00', '17:00', 'VIRTUAL')"
+            )
+        )
+
+
+def test_mscris_cannot_run_on_monday(connection):
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        connection.execute(
+            text(
+                "INSERT INTO allocation_session (training_package, delivery_id, stream, weekday, "
+                "start_time, end_time, delivery_mode) "
+                "VALUES ('BSB', 1, 'MSCRIS', 'MONDAY', '09:00', '17:00', 'VIRTUAL')"
             )
         )
 

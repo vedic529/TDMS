@@ -494,3 +494,31 @@ class FacilityRead(BaseModel):
     is_active: bool
     college_short_names: list[str] = Field(default_factory=list)
     faculties: list[FacilityFacultyRead] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# The Location Dictionary (2.4)
+# ---------------------------------------------------------------------------
+
+
+class LocationCampusRead(BaseModel):
+    id: int
+    campus_code: str
+    campus_name: str
+    campus_location: str
+    approved_address: str | None = None
+    is_active: bool
+    #: Every spelling of the address found in a source system.
+    source_addresses: list[str] = []
+
+
+class LocationCityRead(BaseModel):
+    #: `None` when the campus has no city recorded. The client renders that as
+    #: "City not recorded"; a value is never invented here.
+    city: str | None = None
+    campuses: list[LocationCampusRead] = []
+
+
+class LocationStateRead(BaseModel):
+    state: str
+    cities: list[LocationCityRead] = []

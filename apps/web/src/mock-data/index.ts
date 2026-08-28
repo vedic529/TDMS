@@ -4,17 +4,18 @@ import { MOCK_CAMPUSES, MOCK_COLLEGES } from './colleges';
 import { MOCK_COURSES } from './courses';
 import { MOCK_FACILITIES } from './facilities';
 import { MOCK_QUALIFICATION_OFFERINGS, MOCK_QUALIFICATION_UNIT_SEQUENCES } from './qualifications';
-import { MOCK_STUDENTS } from './students';
-import { MOCK_TIMETABLE_SESSIONS } from './timetable';
-import { MOCK_TRAINERS } from './trainers';
 import { MOCK_USERS } from './users';
 
 /**
- * The complete seeded demo dataset.
+ * The seeded demo dataset.
  *
  * Mock data is never imported by a UI component. Pages read through
  * `TdmsClient`, so replacing `MockTdmsClient` with `ApiTdmsClient` requires no
  * change to any page.
+ *
+ * **Students are not here (25 August 2026).** Student records live in
+ * PostgreSQL and are read through `services/students-api.ts`; there is no
+ * seeded student, and no student is held in browser storage.
  */
 export function createSeedDataset(): TdmsDataset {
   return structuredClone({
@@ -24,14 +25,12 @@ export function createSeedDataset(): TdmsDataset {
     qualificationUnitSequences: MOCK_QUALIFICATION_UNIT_SEQUENCES,
     courses: MOCK_COURSES,
     facilities: MOCK_FACILITIES,
-    trainers: MOCK_TRAINERS,
-    students: MOCK_STUDENTS,
-    timetableSessions: MOCK_TIMETABLE_SESSIONS,
+    // Trainer records live in the database; the prototype dataset holds none.
+    trainers: [],
     users: MOCK_USERS,
     // No seeded access requests: a request is something a real user makes.
     accessRequests: [],
     activityRecords: MOCK_ACTIVITY_RECORDS,
-    importBatches: [],
   });
 }
 
@@ -54,4 +53,3 @@ export {
 export { TIME_OPTIONS } from './timetable';
 export { COUNTRY_OPTIONS } from './colleges';
 export { DEV_PREVIEW_USER_IDS, DEFAULT_MOCK_USER_ID } from './users';
-export { IMPORT_TEMPLATE_COLUMNS, DEMO_IMPORT_CSV, DEMO_IMPORT_FILE_NAME } from './import-sample';

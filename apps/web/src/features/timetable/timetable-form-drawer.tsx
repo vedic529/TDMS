@@ -363,25 +363,7 @@ export function TimetableFormDrawer({
     if (!user || !validation?.canSave) return;
     setBusy(true);
     try {
-      const client = getTdmsClient();
-      if (isEdit && editing) {
-        await client.updateTimetableSession(editing.id, input, { actor: user });
-        toast.success('Timetable record updated', {
-          description: `${editing.recordNumber} was updated and a user activity record was created.`,
-        });
-      } else {
-        const created = await client.createTimetableSession(input, { actor: user });
-        toast.success('Timetable record saved', {
-          description: `${created.recordNumber} was created and a user activity record was created.`,
-        });
-      }
-      setConfirmOpen(false);
-      onOpenChange(false);
-      onSaved();
-    } catch (error) {
-      toast.error('The timetable record could not be saved', {
-        description: error instanceof Error ? error.message : 'Try again, or contact the TDMS administrator.',
-      });
+      toast.error('Allocation records are imported and edited on the calendar, not from this form.');
     } finally {
       setBusy(false);
     }

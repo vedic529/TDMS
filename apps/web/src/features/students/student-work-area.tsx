@@ -6,7 +6,6 @@ import { FileSpreadsheet, UserRoundPen } from 'lucide-react';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PageHeader } from '@/components/common/page-header';
-import { SingleStudentEntry } from './single-student-entry';
 import { StudentRecordsPanel } from './student-records-panel';
 import { BulkStudentImport } from './bulk-student-import';
 import { INTERFACE_NAMES } from '@/lib/interface-names';
@@ -34,13 +33,6 @@ export function StudentWorkArea() {
     router.replace(`/students?${params.toString()}`, { scroll: false });
   }
 
-  function openStudent(studentId: string) {
-    const params = new URLSearchParams();
-    params.set('tab', 'single-entry');
-    params.set('studentId', studentId);
-    router.replace(`/students?${params.toString()}`, { scroll: false });
-  }
-
   return (
     <div className="space-y-5">
       <PageHeader
@@ -61,8 +53,12 @@ export function StudentWorkArea() {
         </TabsList>
 
         <TabsContent value="single-entry" className="space-y-5">
-          <SingleStudentEntry key={studentIdParam ?? 'new'} initialStudentId={studentIdParam} />
-          <StudentRecordsPanel onOpenStudent={openStudent} />
+          {/*
+            One panel. The records list carries its own search and Create
+            control; a record opens in a side panel and the form opens in a
+            popup, so nothing takes over the page.
+          */}
+          <StudentRecordsPanel initialStudentId={studentIdParam} />
         </TabsContent>
 
         <TabsContent value="bulk-import">

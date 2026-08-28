@@ -1,6 +1,5 @@
 import { z } from 'zod';
 
-import type { StudentInput } from '@/types/student';
 import { isValidEmail } from '@/lib/student-rules';
 
 /**
@@ -29,12 +28,11 @@ export const studentFormSchema = z
     proposedEndDate: z.string().min(1, 'Select the proposed final date of the course.'),
     qualificationTitle: z.string().min(1, 'Select the qualification offered by the college and campus.'),
     /**
-     * Approved 11 August 2026: the user selects the Group. Ten qualifications
-     * use Group 1...Group N; every other qualification uses N/A. The value
-     * depends on the chosen qualification, so it is checked by the form's
-     * cross-field rule rather than here, and again by the API.
+     * Amended 25 August 2026: **Group is no longer an input.** It is read from
+     * the matched rolling-timetable intake, along with the Intake itself, and is
+     * never chosen independently (rule 1.3). The form displays what the API
+     * derived; there is nothing here to validate.
      */
-    group: z.string(),
     /**
      * OD-08 approved: staff select the approved Course Duration Option, and the
      * field is always shown. The SRS Required column records it as Conditional,
@@ -59,7 +57,7 @@ export const studentFormSchema = z
 export type StudentFormValues = z.infer<typeof studentFormSchema>;
 
 /** SRS 6.3 field labels, used by the preview, change summary and exports. */
-export const STUDENT_FIELD_LABELS: Array<{ key: keyof StudentInput & string; label: string }> = [
+export const STUDENT_FIELD_LABELS: Array<{ key: string; label: string }> = [
   { key: 'group', label: 'Group' },
   { key: 'intake', label: 'Intake' },
   { key: 'collegeId', label: 'College' },

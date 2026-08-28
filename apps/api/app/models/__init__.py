@@ -31,11 +31,15 @@ from app.models.student import Student, StudentGroup
 from app.models.trainer import Trainer, TrainerAvailability, TrainerQualification, TrainerUnit
 
 # Timetables
-from app.models.timetable import (
-    TimetableClashOverride,
-    TimetablePlan,
-    TimetableSession,
-    TimetableUnitDelivery,
+from app.models.timetable import RollingTimetableWeek
+from app.models.allocation import (
+    AllocationDelivery,
+    AllocationDeliveryIntake,
+    AllocationImportBatch,
+    AllocationPackageProfile,
+    AllocationSession,
+    AllocationSourceRow,
+    ReferenceSuggestion,
 )
 
 # Imports
@@ -72,10 +76,14 @@ __all__ = [
     "TrainerQualification",
     "TrainerUnit",
     # timetables
-    "TimetablePlan",
-    "TimetableUnitDelivery",
-    "TimetableSession",
-    "TimetableClashOverride",
+    "RollingTimetableWeek",
+    "AllocationPackageProfile",
+    "AllocationDelivery",
+    "AllocationDeliveryIntake",
+    "AllocationSession",
+    "AllocationImportBatch",
+    "AllocationSourceRow",
+    "ReferenceSuggestion",
     # imports
     "ImportBatch",
     "ImportStagedRow",
@@ -111,13 +119,17 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "trainer_availability",
     "trainer_qualifications",
     "trainer_units",
-    "timetable_plans",
-    "timetable_unit_deliveries",
-    "timetable_sessions",
-    "timetable_clash_overrides",
+    "allocation_package_profile",
+    "allocation_delivery",
+    "allocation_delivery_intake",
+    "allocation_session",
+    "allocation_import_batch",
+    "allocation_source_row",
+    "reference_suggestion",
     "import_batches",
     "import_staged_rows",
     "import_row_issues",
+    "rolling_timetable_weeks",
 )
 
 #: Database views created by migration (Alembic does not autogenerate views).

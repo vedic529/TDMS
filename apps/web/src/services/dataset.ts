@@ -6,17 +6,16 @@ import type {
   QualificationOffering,
   QualificationUnitSequence,
 } from '@/types/reference';
-import type { StudentRecord } from '@/types/student';
-import type { TimetableSession } from '@/types/timetable';
 import type { TrainerRecord } from '@/types/trainer';
 import type { AccessRequest, TdmsUser } from '@/types/auth';
 import type { UserActivityRecord } from '@/types/activity';
-import type { ImportBatch } from '@/types/import';
 
 /**
- * The complete shape held by the prototype data store.
- * The future FastAPI service returns the same record shapes, so page code does
- * not change when `ApiTdmsClient` replaces `MockTdmsClient`.
+ * The shape held by the prototype data store.
+ *
+ * **Students are not here (25 August 2026).** Student records and their bulk
+ * import live in PostgreSQL and are reached through `services/students-api.ts`,
+ * so neither a seeded student nor an import batch is held in browser storage.
  */
 export interface TdmsDataset {
   colleges: College[];
@@ -26,13 +25,10 @@ export interface TdmsDataset {
   courses: CourseRecord[];
   facilities: Facility[];
   trainers: TrainerRecord[];
-  students: StudentRecord[];
-  timetableSessions: TimetableSession[];
   users: TdmsUser[];
   /** Access Model v1.1 role requests, newest last. */
   accessRequests: AccessRequest[];
   activityRecords: UserActivityRecord[];
-  importBatches: ImportBatch[];
 }
 
 /** Reference data bundle requested once per page load. */

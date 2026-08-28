@@ -116,6 +116,29 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
     __table_args__ = (
         CheckConstraint("proposed_end_date > proposed_start_date", name="course_dates_ordered"),
         soft_delete_check(),
+        # Amended (Student Data Import, 25 August 2026). DBQ-08 originally made
+        # `student_id` UNIQUE across every row. That blocks a person enrolled in
+        # two qualifications, which the approved rule of 1.4 now allows, so the
+        # global unique is replaced by two narrower rules, both partial on
+        # `is_deleted = false` so a soft-deleted record never blocks a genuine
+        # re-enrolment (check D8):
+        #   1. one LIVE enrolment per student per offering, and
+        #   2. at most one ACTIVE live row per student. A student cannot be
+        #      actively enrolled twice, but may hold one ACTIVE plus other
+        #      statuses across different offerings (checks D6, D7).
+        Index(
+            "uq_students_student_id_course_offering_id",
+            "student_id",
+            "course_offering_id",
+            unique=True,
+            postgresql_where=text("is_deleted = false"),
+        ),
+        Index(
+            "uq_students_one_active_enrolment",
+            "student_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE' AND is_deleted = false"),
+        ),
         # Approved index recommendations (proposal §21). Partial on
         # `is_deleted = false` because every operational query excludes deleted
         # rows, which keeps the index smaller than a full one.
@@ -134,10 +157,11 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
 
     id: Mapped[int] = pk_column()
 
-    # DATA-01 / SST-05. UNIQUE across ALL rows including soft-deleted ones:
-    # DBQ-08 approved that a Student ID is permanently reserved, so historical
-    # activity records and import batches referencing it stay unambiguous.
-    student_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # DATA-01 / SST-05. Unique per offering, not globally: a Student ID may hold
+    # more than one enrolment (rule 1.4). Uniqueness now lives in the table-level
+    # constraints above — `(student_id, course_offering_id)` and the one-ACTIVE
+    # partial index — rather than on the column.
+    student_id: Mapped[str] = mapped_column(Text, nullable=False)
 
     student_group_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("student_groups.id", ondelete="RESTRICT"), nullable=True
@@ -157,6 +181,18 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
     # SRS §6.1.3 Required = No.
     last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     coe_status: Mapped[str] = mapped_column(enums.coe_status, nullable=False)
+
+    # Record lifecycle (rule 1.4). Defaults to ACTIVE; only one ACTIVE row per
+    # Student ID is permitted by the partial unique index above.
+    status: Mapped[str] = mapped_column(
+        enums.student_status, nullable=False, server_default="ACTIVE"
+    )
+    # How the rolling-timetable intake was resolved (rule 2.5). MATCHED links a
+    # `student_group_id`; TBD (no rolling timetable) and NOT_APPLICABLE (Credit
+    # Transfer) both leave `student_group_id` NULL.
+    intake_match_status: Mapped[str] = mapped_column(
+        enums.student_intake_match, nullable=False, server_default="TBD"
+    )
 
     proposed_start_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     proposed_end_date: Mapped[dt.date] = mapped_column(Date, nullable=False)

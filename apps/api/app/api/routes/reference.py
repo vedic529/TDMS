@@ -26,6 +26,7 @@ from app.models.user import User
 from app.schemas import reference as schemas
 from app.services import facilities as facility_service
 from app.services import reference_data as service
+from app.services import trainers as trainer_service
 
 router = APIRouter(prefix="/reference", tags=["reference data"])
 
@@ -129,6 +130,31 @@ def update_college(
     session: Session = Depends(get_db),
 ):
     return _commit(session, lambda: service.update_college(session, actor, college_id, payload))
+
+
+# ===========================================================================
+# The Location Dictionary — declared before /campuses/{campus_id} so the
+# literal path wins over the parameterised one
+# ===========================================================================
+
+
+@router.get(
+    "/locations",
+    response_model=list[schemas.LocationStateRead],
+    responses=READ_RESPONSES,
+)
+def location_dictionary(
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """State -> City -> Campus -> Full Address, in one query.
+
+    Built on `campuses` rather than a second location table: a campus is one
+    place, and the facility and clash checks depend on that being one row.
+    A campus with no city recorded is grouped under a null city and rendered
+    "City not recorded" — never a guess.
+    """
+    return trainer_service.location_dictionary(session)
 
 
 # ===========================================================================

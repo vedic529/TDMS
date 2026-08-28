@@ -98,7 +98,7 @@ export function toCourseRecord(row: ApiCourse): CourseRecord {
     courseSector: row.course_sector ?? '',
     // DBQ-03: durations are approved options. The list shows the longest, which
     // is the full-length course; the form edits the whole set.
-    durationInWeeks: row.duration_options.length
+    durationInWeeks: row.duration_options?.length
       ? Math.max(...row.duration_options)
       : 0,
     totalCourseCost: row.total_course_cost === null ? 0 : Number(row.total_course_cost),

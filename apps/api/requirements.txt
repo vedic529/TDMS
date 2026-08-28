@@ -8,7 +8,7 @@
 # signature against the tenant's published JWKS. `[crypto]` pulls in the RSA
 # support that makes signature verification real rather than decorative.
 #
-# Still deliberately absent: openpyxl. It arrives with the feature that needs it.
+# openpyxl reads .xlsx uploads. python-multipart is required for those uploads.
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
@@ -26,3 +26,6 @@ pyjwt[crypto]==2.10.1
 # Testing
 pytest==8.3.4
 httpx==0.28.1
+python-multipart==0.0.20
+openpyxl==3.1.5
+

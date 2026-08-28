@@ -38,6 +38,20 @@ access_request_status = _pg_enum(
 # -- Students ----------------------------------------------------------------
 coe_status = _pg_enum("COE", "NON_COE", name="coe_status")
 
+# A student record's lifecycle. ACTIVE is the default; the partial unique index
+# on `students` permits at most one ACTIVE (non-deleted) row per Student ID, so a
+# person enrolled in two qualifications carries one ACTIVE and one other status.
+student_status = _pg_enum(
+    "ACTIVE", "COMPLETED", "CANCELLED", "NOT_YET_STARTED", name="student_status"
+)
+
+# How the rolling-timetable intake was resolved for a student.
+# MATCHED — an intake was found. TBD — the qualification has no rolling timetable
+# yet, so no intake could be worked out. NOT_APPLICABLE — a Credit Transfer
+# student, who has no intake by the approved rule of 13 August 2026.
+# `student_group_id` stays NULL in the TBD and NOT_APPLICABLE cases.
+student_intake_match = _pg_enum("MATCHED", "TBD", "NOT_APPLICABLE", name="student_intake_match")
+
 # -- Reference data ----------------------------------------------------------
 uoc_type = _pg_enum("THEORY", "THEORY_AND_PRACTICAL", name="uoc_type")
 
@@ -45,8 +59,67 @@ uoc_type = _pg_enum("THEORY", "THEORY_AND_PRACTICAL", name="uoc_type")
 mode_of_delivery = _pg_enum("PHYSICAL", "VIRTUAL", name="mode_of_delivery")
 weekday_mode = _pg_enum("NOT_AVAILABLE", "PHYSICAL", "VIRTUAL", name="weekday_mode")
 weekday = _pg_enum("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", name="weekday")
-class_type = _pg_enum("THEORY", "PRACTICAL", name="class_type")
+# THEORY_AND_PRACTICAL (27 August 2026): "Theory and Practical" on a trainer
+# record means eligible for **both**, and the form already offered the option.
+class_type = _pg_enum("THEORY", "PRACTICAL", "THEORY_AND_PRACTICAL", name="class_type")
 session_type = _pg_enum("THEORY", "PRACTICAL", "ADDITIONAL", name="session_type")
+
+# -- Rolling timetable -------------------------------------------------------
+# One stored value per Intake and Week that carries a requirement. NA is not a
+# stored type: absence of a row is what NA means.
+rolling_schedule_type = _pg_enum("UNIT", "BREAK", "ASSESSMENT_WEEK", name="rolling_schedule_type")
+
+# Closed list of training packages. A twelfth value needs a reviewed migration.
+TRAINING_PACKAGE_VALUES: tuple[str, ...] = (
+    "CHC",
+    "BSB",
+    "FNS",
+    "SIT",
+    "AUR",
+    "CPC",
+    "ICT",
+    "RII",
+    "TLI",
+    "UEE",
+    "AHC",
+)
+training_package = _pg_enum(*TRAINING_PACKAGE_VALUES, name="training_package")
+
+# -- Allocation records ------------------------------------------------------
+uoc_type_allocation = _pg_enum(
+    "THEORY_ONLY", "PRACTICAL_ONLY", "THEORY_AND_PRACTICAL", name="uoc_type_allocation"
+)
+allocation_mode_of_delivery = _pg_enum("F2FP", "F2FPV", "F2FV", name="allocation_mode_of_delivery")
+allocation_stream = _pg_enum("THEORY", "PRACTICAL", "MSCRIS", name="allocation_stream")
+allocation_weekday = _pg_enum(
+    "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", name="allocation_weekday"
+)
+session_delivery_mode = _pg_enum("PHYSICAL", "VIRTUAL", name="session_delivery_mode")
+virtual_classroom_kind = _pg_enum(
+    "FACE_TO_FACE_VC", "FACE_TO_FACE_VIRTUAL", name="virtual_classroom_kind"
+)
+intake_match_status = _pg_enum("MATCHED", "NOT_FOUND", name="intake_match_status")
+suggestion_entity_type = _pg_enum(
+    "COLLEGE", "CAMPUS", "QUALIFICATION", "UNIT", "FACILITY", "TRAINER", name="suggestion_entity_type"
+)
+# EXCEPTION and WITHDRAWN (26 August 2026): an accepted exception is recorded
+# in this same table, distinguished by status, so a value cannot be pending and
+# excepted at once and promoting an exception reuses the resolve path unchanged.
+# WITHDRAWN exists for a future need and is not written by the current code.
+suggestion_status = _pg_enum(
+    "PENDING", "ADDED", "MAPPED", "DELETED", "REJECTED", "EXCEPTION", "WITHDRAWN",
+    name="suggestion_status",
+)
+suggestion_source = _pg_enum(
+    "ALLOCATION_IMPORT",
+    "ROLLING_IMPORT",
+    "MANUAL",
+    "STUDENT_IMPORT",
+    # So the shared queue can say a value came from a trainer file.
+    "TRAINER_IMPORT",
+    name="suggestion_source",
+)
+apply_mode = _pg_enum("REPLACE", "MERGE", name="apply_mode")
 
 # -- Imports -----------------------------------------------------------------
 staged_row_status = _pg_enum(
@@ -101,6 +174,8 @@ ALL_ENUM_NAMES: tuple[str, ...] = (
     "access_request_status",
     "account_status",
     "coe_status",
+    "student_status",
+    "student_intake_match",
     "uoc_type",
     "mode_of_delivery",
     "weekday_mode",
@@ -112,4 +187,17 @@ ALL_ENUM_NAMES: tuple[str, ...] = (
     "activity_result",
     "ms_sign_in_result",
     "access_decision",
+    "rolling_schedule_type",
+    "training_package",
+    "uoc_type_allocation",
+    "allocation_mode_of_delivery",
+    "allocation_stream",
+    "allocation_weekday",
+    "session_delivery_mode",
+    "virtual_classroom_kind",
+    "intake_match_status",
+    "suggestion_entity_type",
+    "suggestion_status",
+    "suggestion_source",
+    "apply_mode",
 )

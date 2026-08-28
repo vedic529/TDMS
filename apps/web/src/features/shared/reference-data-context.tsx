@@ -108,13 +108,9 @@ export function ReferenceDataProvider({ children }: { children: React.ReactNode 
         qualificationOfferings,
       });
 
-      // Bulk Student Import validates against these, not the prototype dataset.
-      // Without this a real campus address in a student file is compared with an
-      // invented one and rejected as unapproved.
-      const client = getTdmsClient();
-      if ('setReferenceLookups' in client && typeof client.setReferenceLookups === 'function') {
-        client.setReferenceLookups({ colleges, campuses, qualificationOfferings });
-      }
+      // Bulk Student Import no longer validates in the browser: the API reads
+      // the file and resolves every reference against the database directly,
+      // so there is nothing to hand the prototype client here.
     } catch {
       setError('Reference data could not be loaded. Refresh the page or contact the TDMS administrator.');
     } finally {

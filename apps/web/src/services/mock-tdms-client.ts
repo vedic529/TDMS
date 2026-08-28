@@ -8,14 +8,10 @@ import type {
   TdmsUser,
 } from '@/types/auth';
 import type { ActivityFilters, UserActivityRecord } from '@/types/activity';
-import type { ImportBatch, ImportResult, StagedStudentRow } from '@/types/import';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
-import type { StudentFilters, StudentInput, StudentRecord } from '@/types/student';
-import type { TimetableFilters, TimetableInput, TimetableSession } from '@/types/timetable';
-import type { TrainerFilters, TrainerInput, TrainerRecord } from '@/types/trainer';
 import type { SoftDeletable, SoftDeleteMetadata } from '@/types/common';
 
-import { addDays, nowIso, rangesOverlap, today } from '@/lib/format';
+import { addDays, nowIso, today } from '@/lib/format';
 import { PROPOSED_RECYCLE_PERIOD_DAYS } from '@/lib/reasons';
 import { SRS_PAGE_REFERENCE } from '@/lib/interface-names';
 import {
@@ -24,18 +20,10 @@ import {
   canManageUserRoles,
   requestableRolesFor,
 } from '@/lib/permissions';
-import { NO_GROUP, deriveIntakeDate } from '@/lib/student-rules';
 import { createSeedDataset } from '@/mock-data';
-import { qualificationByCode } from '@/mock-data/qualifications';
 
 import type { ReferenceDataBundle, TdmsDataset } from './dataset';
 import { PROTOTYPE_STORAGE_KEYS, readPrototypeValue, writePrototypeValue } from './prototype-storage';
-import {
-  countByStatus,
-  splitEmails,
-  validateStagedRows,
-  type ReferenceLookups,
-} from './import-validation';
 import type {
   ActionContext,
   CourseFilters,
@@ -43,7 +31,6 @@ import type {
   QualificationUnitFilters,
   QualificationUnitInput,
   ReasonedRequest,
-  StageImportRequest,
   TdmsClient,
   UserInput,
 } from './tdms-client';
@@ -105,40 +92,19 @@ export class MockTdmsClient implements TdmsClient {
 
   private dataset: TdmsDataset;
 
-  /**
-   * Approved reference values from PostgreSQL, when they have been loaded.
-   *
-   * Bulk import validates a student file against real colleges, campuses and
-   * offerings — never the prototype dataset. Comparing a genuine campus address
-   * against an invented one is why
-   * `132-146 Elizabeth Street, HOBART, Tasmania 7000` was reported as an
-   * unapproved campus when it is exactly what the database holds.
-   *
-   * Null until `ReferenceDataProvider` supplies it; the fallback keeps the
-   * prototype working in mock mode rather than validating against nothing.
-   */
-  private referenceLookups: ReferenceLookups | null = null;
 
   constructor() {
     this.dataset = this.load();
-  }
-
-  /** Called once real reference data has loaded. */
-  setReferenceLookups(lookups: Omit<ReferenceLookups, 'students'>): void {
-    this.referenceLookups = { ...lookups, students: this.dataset.students };
-  }
-
-  private get validationReference(): ReferenceLookups {
-    return this.referenceLookups
-      ? { ...this.referenceLookups, students: this.dataset.students }
-      : this.dataset;
   }
 
   // -- storage -------------------------------------------------------------
 
   private load(): TdmsDataset {
     const stored = readPrototypeValue<TdmsDataset>(PROTOTYPE_STORAGE_KEYS.dataset);
-    if (stored && Array.isArray(stored.students) && Array.isArray(stored.timetableSessions)) {
+    // A dataset stored before students moved to the database still carries a
+    // `students` array. Reseeding on that shape drops it rather than keeping a
+    // stale copy of records that now live in PostgreSQL.
+    if (stored && Array.isArray(stored.trainers) && !('students' in stored)) {
       return stored;
     }
     return createSeedDataset();
@@ -169,14 +135,9 @@ export class MockTdmsClient implements TdmsClient {
   // -- reference data ------------------------------------------------------
 
   async getReferenceData(): Promise<ReferenceDataBundle> {
-    const groups = Array.from(
-      new Set([
-        ...activeOnly(this.dataset.timetableSessions).map((session) => session.group),
-        ...activeOnly(this.dataset.students).map((student) => student.group),
-      ]),
-    )
-      .filter(Boolean)
-      .sort();
+    // Groups come from the student records, which now live in the database —
+    // this bundle no longer supplies them, and no caller reads them.
+    const groups: string[] = [];
 
     return delay({
       colleges: this.dataset.colleges,
@@ -184,515 +145,15 @@ export class MockTdmsClient implements TdmsClient {
       qualificationOfferings: this.dataset.qualificationOfferings,
       qualificationUnitSequences: activeOnly(this.dataset.qualificationUnitSequences),
       facilities: this.dataset.facilities,
+      // Always empty: trainer records live in the database (27 August 2026).
       trainers: activeOnly(this.dataset.trainers),
       groups,
     });
   }
 
-  // -- Timetable View and Management ---------------------------------------
-
-  async listTimetableSessions(filters: TimetableFilters): Promise<TimetableSession[]> {
-    const rows = activeOnly(this.dataset.timetableSessions).filter((session) => {
-      // TT-03: show every session that overlaps the selected date range.
-      if (filters.fromDate && filters.toDate) {
-        if (!rangesOverlap(session.uocStartDate, session.uocEndDate, filters.fromDate, filters.toDate)) {
-          return false;
-        }
-      }
-      if (filters.collegeId && session.collegeId !== filters.collegeId) return false;
-      if (filters.campusId && session.campusId !== filters.campusId) return false;
-      if (filters.qualificationCode && session.qualificationCode !== filters.qualificationCode) return false;
-      if (filters.group && session.group !== filters.group) return false;
-      return true;
-    });
-
-    return delay([...rows].sort((a, b) => a.uocStartDate.localeCompare(b.uocStartDate)));
-  }
-
-  async createTimetableSession(input: TimetableInput, context: ActionContext): Promise<TimetableSession> {
-    const recordNumber = nextNumber(
-      this.dataset.timetableSessions.map((session) => session.recordNumber),
-      'TT-',
-      5,
-    );
-    const session: TimetableSession = {
-      ...input,
-      id: `tt-${recordNumber.toLowerCase()}`,
-      recordNumber,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      isDeleted: false,
-    };
-    this.dataset.timetableSessions = [session, ...this.dataset.timetableSessions];
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.timetable,
-      action: 'Timetable save',
-      recordOrBatchReference: recordNumber,
-      reasonDetail: input.overrideReasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Timetable record created for ${input.group}, unit ${input.uocCode}.`,
-    });
-    this.persist();
-    return delay(session);
-  }
-
-  async updateTimetableSession(
-    id: string,
-    input: TimetableInput,
-    context: ActionContext,
-  ): Promise<TimetableSession> {
-    const existing = this.dataset.timetableSessions.find((session) => session.id === id);
-    if (!existing) throw new Error('Timetable record not found.');
-    const updated: TimetableSession = { ...existing, ...input, updatedAt: nowIso() };
-    this.dataset.timetableSessions = this.dataset.timetableSessions.map((session) =>
-      session.id === id ? updated : session,
-    );
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.timetable,
-      action: 'Edit',
-      recordOrBatchReference: existing.recordNumber,
-      result: 'Completed',
-      plainLanguageDetail: `Timetable record ${existing.recordNumber} updated after the change summary was confirmed.`,
-    });
-    this.persist();
-    return delay(updated);
-  }
-
-  async deleteTimetableSession(id: string, request: ReasonedRequest, context: ActionContext): Promise<void> {
-    const existing = this.dataset.timetableSessions.find((session) => session.id === id);
-    if (!existing) throw new Error('Timetable record not found.');
-    const deletion = buildDeletion(request, context.actor);
-    this.dataset.timetableSessions = this.dataset.timetableSessions.map((session) =>
-      session.id === id ? { ...session, isDeleted: true, deletion } : session,
-    );
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.timetable,
-      action: 'Delete',
-      recordOrBatchReference: existing.recordNumber,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Timetable record moved to the recycle area. Recovery deadline ${deletion.recoveryDeadline}.`,
-    });
-    this.persist();
-    await delay(null);
-  }
-
-  async listDeletedTimetableSessions(): Promise<TimetableSession[]> {
-    return delay(deletedOnly(this.dataset.timetableSessions));
-  }
-
-  async restoreTimetableSession(
-    id: string,
-    request: ReasonedRequest,
-    context: ActionContext,
-  ): Promise<TimetableSession> {
-    const existing = this.dataset.timetableSessions.find((session) => session.id === id);
-    if (!existing) throw new Error('Timetable record not found.');
-    const restored: TimetableSession = { ...existing, isDeleted: false, deletion: undefined, updatedAt: nowIso() };
-    this.dataset.timetableSessions = this.dataset.timetableSessions.map((session) =>
-      session.id === id ? restored : session,
-    );
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.timetable,
-      action: 'Restore',
-      recordOrBatchReference: existing.recordNumber,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Timetable record ${existing.recordNumber} restored from the recycle area.`,
-    });
-    this.persist();
-    return delay(restored);
-  }
-
-  // -- Single Student Entry ------------------------------------------------
-
-  async listStudents(filters: StudentFilters): Promise<StudentRecord[]> {
-    const rows = activeOnly(this.dataset.students).filter((student) => {
-      if (filters.collegeId && student.collegeId !== filters.collegeId) return false;
-      if (filters.campusId && student.campusId !== filters.campusId) return false;
-      if (filters.qualificationCode && student.qualificationCode !== filters.qualificationCode) return false;
-      if (filters.coeStatus && student.coeStatus !== filters.coeStatus) return false;
-      if (filters.intake && student.intake !== filters.intake) return false;
-      if (
-        filters.search &&
-        !includesText(
-          [
-            student.studentId,
-            student.firstName,
-            student.lastName,
-            student.collegeEmail,
-            student.group,
-            student.qualificationCode,
-            student.qualificationTitle,
-          ],
-          filters.search,
-        )
-      ) {
-        return false;
-      }
-      return true;
-    });
-    return delay([...rows].sort((a, b) => a.studentId.localeCompare(b.studentId)));
-  }
-
-  async findStudentByStudentId(studentId: string): Promise<StudentRecord | null> {
-    const needle = studentId.trim().toUpperCase();
-    const found = activeOnly(this.dataset.students).find(
-      (student) => student.studentId.toUpperCase() === needle,
-    );
-    return delay(found ?? null);
-  }
-
-  async isStudentIdAvailable(studentId: string, excludeRecordId?: string): Promise<boolean> {
-    const needle = studentId.trim().toUpperCase();
-    if (!needle) return delay(false);
-    const clash = activeOnly(this.dataset.students).some(
-      (student) => student.studentId.toUpperCase() === needle && student.id !== excludeRecordId,
-    );
-    return delay(!clash);
-  }
-
-  async createStudent(input: StudentInput, context: ActionContext): Promise<StudentRecord> {
-    const student: StudentRecord = {
-      ...input,
-      id: `stu-${input.studentId.toLowerCase()}-${this.dataset.students.length + 1}`,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      isDeleted: false,
-    };
-    this.dataset.students = [student, ...this.dataset.students];
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.singleStudentEntry,
-      action: 'Create',
-      recordOrBatchReference: student.studentId,
-      result: 'Completed',
-      plainLanguageDetail: `Student record created for ${student.firstName} ${student.lastName} (${student.qualificationCode}).`,
-    });
-    this.persist();
-    return delay(student);
-  }
-
-  async updateStudent(id: string, input: StudentInput, context: ActionContext): Promise<StudentRecord> {
-    const existing = this.dataset.students.find((student) => student.id === id);
-    if (!existing) throw new Error('Student record not found.');
-    const updated: StudentRecord = { ...existing, ...input, updatedAt: nowIso() };
-    this.dataset.students = this.dataset.students.map((student) => (student.id === id ? updated : student));
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.singleStudentEntry,
-      action: 'Edit',
-      recordOrBatchReference: updated.studentId,
-      result: 'Completed',
-      plainLanguageDetail: `Student record ${updated.studentId} updated after the change summary was confirmed.`,
-    });
-    this.persist();
-    return delay(updated);
-  }
-
-  async deleteStudent(id: string, request: ReasonedRequest, context: ActionContext): Promise<void> {
-    const existing = this.dataset.students.find((student) => student.id === id);
-    if (!existing) throw new Error('Student record not found.');
-    const deletion = buildDeletion(request, context.actor);
-    this.dataset.students = this.dataset.students.map((student) =>
-      student.id === id ? { ...student, isDeleted: true, deletion } : student,
-    );
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.singleStudentEntry,
-      action: 'Delete',
-      recordOrBatchReference: existing.studentId,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Student record moved to the recycle area. Recovery deadline ${deletion.recoveryDeadline}.`,
-    });
-    this.persist();
-    await delay(null);
-  }
-
-  async listDeletedStudents(): Promise<StudentRecord[]> {
-    return delay(deletedOnly(this.dataset.students));
-  }
-
-  async restoreStudent(id: string, request: ReasonedRequest, context: ActionContext): Promise<StudentRecord> {
-    const existing = this.dataset.students.find((student) => student.id === id);
-    if (!existing) throw new Error('Student record not found.');
-    const restored: StudentRecord = { ...existing, isDeleted: false, deletion: undefined, updatedAt: nowIso() };
-    this.dataset.students = this.dataset.students.map((student) => (student.id === id ? restored : student));
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.singleStudentEntry,
-      action: 'Restore',
-      recordOrBatchReference: existing.studentId,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Student record ${existing.studentId} restored from the recycle area.`,
-    });
-    this.persist();
-    return delay(restored);
-  }
-
-  // -- Bulk Student Import -------------------------------------------------
-
-  async stageImport(request: StageImportRequest, context: ActionContext): Promise<ImportBatch> {
-    const batchReference = nextNumber(
-      this.dataset.importBatches.map((batch) => batch.batchReference),
-      'BATCH-',
-      6,
-    );
-
-    const rows: StagedStudentRow[] = request.rows.map((raw, index) => ({
-      id: `${batchReference}-row-${index + 1}`,
-      // Row 1 is the header, so the first data row is source row 2.
-      sourceRowNumber: index + 2,
-      studentId: raw['Student ID'] ?? '',
-      firstName: raw['First Name'] ?? '',
-      lastName: raw['Last Name'] ?? '',
-      collegeValue: raw['College'] ?? '',
-      campusValue: raw['Campus'] ?? '',
-      qualificationValue: raw['Qualification'] ?? '',
-      ctStudent: raw['CT Student'] ?? '',
-      group: raw['Group'] ?? '',
-      coeStatus: raw['CoE / Non-CoE'] ?? '',
-      proposedStartDate: raw['Proposed Start Date'] ?? '',
-      proposedEndDate: raw['Proposed End Date'] ?? '',
-      personalEmail: raw['Personal Email'] ?? '',
-      primaryPhone: raw['Primary Phone'] ?? '',
-      status: 'Needs correction',
-      issues: [],
-      corrected: false,
-    }));
-
-    const batch: ImportBatch = {
-      id: `imp-${batchReference.toLowerCase()}`,
-      batchReference,
-      fileName: request.fileName,
-      fileSizeBytes: request.fileSizeBytes,
-      uploadedAt: nowIso(),
-      uploadedByUserId: context.actor.id,
-      uploadedByDisplayName: context.actor.displayName,
-      rowCount: rows.length,
-      rows: validateStagedRows(rows, this.validationReference),
-    };
-
-    this.dataset.importBatches = [batch, ...this.dataset.importBatches].slice(0, 10);
-    this.persist();
-    return delay(batch);
-  }
-
-  async revalidateImport(batch: ImportBatch): Promise<ImportBatch> {
-    const revalidated: ImportBatch = {
-      ...batch,
-      rows: validateStagedRows(batch.rows, this.validationReference),
-    };
-    this.dataset.importBatches = this.dataset.importBatches.map((entry) =>
-      entry.id === batch.id ? revalidated : entry,
-    );
-    this.persist();
-    return delay(revalidated);
-  }
-
-  async saveImport(batch: ImportBatch, context: ActionContext): Promise<ImportResult> {
-    const counts = countByStatus(batch.rows);
-    const readyRows = batch.rows.filter((row) => row.status === 'Ready');
-
-    // BULK-08: the confirmed set is written together or not at all.
-    const created: StudentRecord[] = readyRows.map((row) => {
-      const campus = this.dataset.campuses.find((entry) => entry.id === row.resolvedCampusId);
-      const college = this.dataset.colleges.find((entry) => entry.id === row.resolvedCollegeId);
-      const definition = qualificationByCode(row.resolvedQualificationCode ?? '');
-      const durationDays =
-        row.proposedStartDate && row.proposedEndDate
-          ? Math.round(
-              (new Date(`${row.proposedEndDate}T00:00:00Z`).getTime() -
-                new Date(`${row.proposedStartDate}T00:00:00Z`).getTime()) /
-                86_400_000,
-            )
-          : 0;
-
-      // Credit Transfer decides whether three fields apply at all (approved
-      // 13 August 2026). A CT student has no group, no intake and no course
-      // duration option — and a value supplied in the file for any of them is
-      // ignored rather than accepted, so `CT=Yes, Group 4` cannot become a real
-      // group assignment by being typed into a spreadsheet.
-      const isCreditTransfer = row.ctStudent.trim().toLowerCase() === 'yes';
-
-      return {
-        id: `stu-${row.studentId.toLowerCase()}-${batch.batchReference}`,
-        group: isCreditTransfer ? NO_GROUP : row.group.trim() || NO_GROUP,
-        intake: isCreditTransfer ? null : deriveIntakeDate(row.proposedStartDate),
-        collegeId: row.resolvedCollegeId ?? '',
-        campusId: row.resolvedCampusId ?? '',
-        collegeEmail: college ? `${row.studentId.toLowerCase()}@${college.emailDomain}` : '',
-        firstName: row.firstName,
-        lastName: row.lastName,
-        studentId: row.studentId,
-        coeStatus: row.coeStatus === 'Non-CoE' ? 'Non-CoE' : 'CoE',
-        proposedStartDate: row.proposedStartDate,
-        proposedEndDate: row.proposedEndDate,
-        // OD-08 approved: inclusive counting, and Course Duration Option is a
-        // staff selection. An import supplies no option, so it stays unset.
-        actualCourseDuration: Math.max(0, Math.round((durationDays + 1) / 7)),
-        courseDurationOption: null,
-        qualificationTitle: definition?.qualificationTitle ?? '',
-        qualificationCode: row.resolvedQualificationCode ?? '',
-        // Read from the file, never assumed. Defaulting every imported student
-        // to No would invent a Credit Transfer status for all of them.
-        ctStudent: isCreditTransfer ? 'Yes' : 'No',
-        // Several addresses are allowed and stored comma-separated, normalised
-        // to a single separator so `a@x.com,b@y.com` and `a@x.com , b@y.com`
-        // are stored the same way (approved 14 August 2026).
-        personalEmail: splitEmails(row.personalEmail).join(','),
-        primaryPhone: row.primaryPhone,
-        state: campus?.state ?? '',
-        primaryCountry: '',
-        remarks: `Imported from ${batch.fileName} (${batch.batchReference}).`,
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
-        isDeleted: false,
-      } satisfies StudentRecord;
-    });
-
-    this.dataset.students = [...created, ...this.dataset.students];
-
-    const result: ImportResult = {
-      inserted: created.length,
-      excluded: counts.excluded,
-      duplicate: counts.duplicate,
-      corrected: counts.corrected,
-      rejected: counts.needsCorrection,
-      unmatched: counts.unmatched,
-      completedAt: nowIso(),
-    };
-
-    this.dataset.importBatches = this.dataset.importBatches.map((entry) =>
-      entry.id === batch.id ? { ...batch, result } : entry,
-    );
-
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.bulkStudentImport,
-      action: 'Import',
-      recordOrBatchReference: batch.batchReference,
-      result: 'Completed',
-      plainLanguageDetail: `Bulk student import saved from ${batch.fileName}. Inserted ${result.inserted}, excluded ${result.excluded}, duplicate ${result.duplicate}, unmatched ${result.unmatched}.`,
-    });
-
-    this.persist();
-    return delay(result);
-  }
-
   // -- Trainer Data --------------------------------------------------------
-
-  async listTrainers(filters: TrainerFilters): Promise<TrainerRecord[]> {
-    // TRN-01: no results until a qualification is selected.
-    if (!filters.qualificationCode) return delay([]);
-
-    const rows = activeOnly(this.dataset.trainers).filter((trainer) => {
-      if (!trainer.qualificationsCanTeach.includes(filters.qualificationCode!)) return false;
-      if (filters.campusId && trainer.campusId !== filters.campusId) return false;
-      if (filters.location && trainer.location !== filters.location) return false;
-      if (filters.classType && trainer.classType !== filters.classType) return false;
-      if (filters.status === 'active' && !trainer.isActive) return false;
-      if (filters.status === 'inactive' && trainer.isActive) return false;
-      if (filters.search && !includesText([trainer.trainerId, trainer.trainerName, trainer.location], filters.search)) {
-        return false;
-      }
-      return true;
-    });
-
-    return delay([...rows].sort((a, b) => a.serialNumber - b.serialNumber));
-  }
-
-  async createTrainer(input: TrainerInput, context: ActionContext): Promise<TrainerRecord> {
-    const serialNumber = this.dataset.trainers.reduce((max, trainer) => Math.max(max, trainer.serialNumber), 0) + 1;
-    const trainer: TrainerRecord = {
-      ...input,
-      id: `trn-${input.trainerId.toLowerCase()}`,
-      serialNumber,
-      isDeleted: false,
-    };
-    this.dataset.trainers = [...this.dataset.trainers, trainer];
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.trainerData,
-      action: 'Create',
-      recordOrBatchReference: trainer.trainerId,
-      result: 'Completed',
-      plainLanguageDetail: `Trainer ${trainer.trainerName} added to trainer reference data.`,
-    });
-    this.persist();
-    return delay(trainer);
-  }
-
-  async updateTrainer(id: string, input: TrainerInput, context: ActionContext): Promise<TrainerRecord> {
-    const existing = this.dataset.trainers.find((trainer) => trainer.id === id);
-    if (!existing) throw new Error('Trainer record not found.');
-    const updated: TrainerRecord = { ...existing, ...input };
-    this.dataset.trainers = this.dataset.trainers.map((trainer) => (trainer.id === id ? updated : trainer));
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.trainerData,
-      action: 'Edit',
-      recordOrBatchReference: updated.trainerId,
-      result: 'Completed',
-      plainLanguageDetail: `Trainer ${updated.trainerName} updated after the change summary was confirmed.`,
-    });
-    this.persist();
-    return delay(updated);
-  }
-
-  async deleteTrainer(id: string, request: ReasonedRequest, context: ActionContext): Promise<void> {
-    const existing = this.dataset.trainers.find((trainer) => trainer.id === id);
-    if (!existing) throw new Error('Trainer record not found.');
-    const deletion = buildDeletion(request, context.actor);
-    this.dataset.trainers = this.dataset.trainers.map((trainer) =>
-      trainer.id === id ? { ...trainer, isDeleted: true, isActive: false, deletion } : trainer,
-    );
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.trainerData,
-      action: 'Delete',
-      recordOrBatchReference: existing.trainerId,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Trainer record moved to the recycle area. Recovery deadline ${deletion.recoveryDeadline}.`,
-    });
-    this.persist();
-    await delay(null);
-  }
-
-  async listDeletedTrainers(): Promise<TrainerRecord[]> {
-    return delay(deletedOnly(this.dataset.trainers));
-  }
-
-  async restoreTrainer(id: string, request: ReasonedRequest, context: ActionContext): Promise<TrainerRecord> {
-    const existing = this.dataset.trainers.find((trainer) => trainer.id === id);
-    if (!existing) throw new Error('Trainer record not found.');
-    const restored: TrainerRecord = { ...existing, isDeleted: false, deletion: undefined };
-    this.dataset.trainers = this.dataset.trainers.map((trainer) => (trainer.id === id ? restored : trainer));
-    this.logActivity({
-      ...this.actorFields(context.actor),
-      pageOrFunction: SRS_PAGE_REFERENCE.trainerData,
-      action: 'Restore',
-      recordOrBatchReference: existing.trainerId,
-      reason: request.reason,
-      reasonDetail: request.reasonDetail,
-      result: 'Completed',
-      plainLanguageDetail: `Trainer record ${existing.trainerId} restored from the recycle area.`,
-    });
-    this.persist();
-    return delay(restored);
-  }
+  // Removed 27 August 2026: trainer records live in PostgreSQL and are reached
+  // through `services/trainers-api.ts`. No trainer is held in browser storage.
 
   // -- Course Data ---------------------------------------------------------
 

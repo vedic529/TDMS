@@ -9,11 +9,7 @@ import type {
   TdmsUser,
 } from '@/types/auth';
 import type { UserActivityRecord, ActivityFilters } from '@/types/activity';
-import type { StudentRecord, StudentInput, StudentFilters } from '@/types/student';
-import type { TimetableSession, TimetableInput, TimetableFilters } from '@/types/timetable';
-import type { TrainerRecord, TrainerInput, TrainerFilters } from '@/types/trainer';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
-import type { ImportBatch, ImportResult, StagedStudentRow } from '@/types/import';
 import type { ReferenceDataBundle } from './dataset';
 
 /**
@@ -61,11 +57,6 @@ export type CourseInput = Omit<CourseRecord, 'id' | 'isDeleted' | 'deletion'>;
 export type QualificationUnitInput = Omit<QualificationUnitSequence, 'id' | 'isDeleted' | 'deletion'>;
 export type UserInput = Omit<TdmsUser, 'id' | 'lastSignInAt'>;
 
-export interface StageImportRequest {
-  fileName: string;
-  fileSizeBytes: number;
-  rows: Array<Record<string, string>>;
-}
 
 export interface TdmsClient {
   /** Identifies which implementation is active, so the UI can label demo mode. */
@@ -74,39 +65,18 @@ export interface TdmsClient {
   // -- Reference data ------------------------------------------------------
   getReferenceData(): Promise<ReferenceDataBundle>;
 
-  // -- Timetable View and Management ---------------------------------------
-  listTimetableSessions(filters: TimetableFilters): Promise<TimetableSession[]>;
-  createTimetableSession(input: TimetableInput, context: ActionContext): Promise<TimetableSession>;
-  updateTimetableSession(id: string, input: TimetableInput, context: ActionContext): Promise<TimetableSession>;
-  deleteTimetableSession(id: string, request: ReasonedRequest, context: ActionContext): Promise<void>;
-  listDeletedTimetableSessions(): Promise<TimetableSession[]>;
-  restoreTimetableSession(id: string, request: ReasonedRequest, context: ActionContext): Promise<TimetableSession>;
-
-  // -- Single Student Entry ------------------------------------------------
-  listStudents(filters: StudentFilters): Promise<StudentRecord[]>;
-  findStudentByStudentId(studentId: string): Promise<StudentRecord | null>;
-  isStudentIdAvailable(studentId: string, excludeRecordId?: string): Promise<boolean>;
-  createStudent(input: StudentInput, context: ActionContext): Promise<StudentRecord>;
-  updateStudent(id: string, input: StudentInput, context: ActionContext): Promise<StudentRecord>;
-  deleteStudent(id: string, request: ReasonedRequest, context: ActionContext): Promise<void>;
-  listDeletedStudents(): Promise<StudentRecord[]>;
-  restoreStudent(id: string, request: ReasonedRequest, context: ActionContext): Promise<StudentRecord>;
-
-  // -- Bulk Student Import -------------------------------------------------
-  /** Loads rows into the staging area. Nothing is written to the database (BULK-02). */
-  stageImport(request: StageImportRequest, context: ActionContext): Promise<ImportBatch>;
-  /** Re-runs validation over corrected or excluded staged rows (BULK-06). */
-  revalidateImport(batch: ImportBatch): Promise<ImportBatch>;
-  /** Writes the confirmed staged set in one transaction (BULK-08). */
-  saveImport(batch: ImportBatch, context: ActionContext): Promise<ImportResult>;
+  // -- Student Data --------------------------------------------------------
+  // Student records and the bulk import are **not** on this interface. They
+  // live in PostgreSQL and are reached through `services/students-api.ts`,
+  // which talks to the API directly (25 August 2026). There is no mock
+  // implementation of them, and no student is held in browser storage.
 
   // -- Trainer Data --------------------------------------------------------
-  listTrainers(filters: TrainerFilters): Promise<TrainerRecord[]>;
-  createTrainer(input: TrainerInput, context: ActionContext): Promise<TrainerRecord>;
-  updateTrainer(id: string, input: TrainerInput, context: ActionContext): Promise<TrainerRecord>;
-  deleteTrainer(id: string, request: ReasonedRequest, context: ActionContext): Promise<void>;
-  listDeletedTrainers(): Promise<TrainerRecord[]>;
-  restoreTrainer(id: string, request: ReasonedRequest, context: ActionContext): Promise<TrainerRecord>;
+  // Trainer records, their locations and their units are **not** on this
+  // interface, for the same reason students are not. They live in PostgreSQL
+  // and are reached through `services/trainers-api.ts` (27 August 2026). There
+  // is no mock implementation of them, and no trainer is held in browser
+  // storage.
 
   // -- College and Course Reference Data -----------------------------------
   listCourses(filters: CourseFilters): Promise<CourseRecord[]>;
@@ -175,5 +145,3 @@ export interface TdmsClient {
   /** Restores the seeded demo dataset. Development tools only. */
   resetPrototypeData(): Promise<void>;
 }
-
-export type { StagedStudentRow };

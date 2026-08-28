@@ -16,6 +16,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { EmptyState } from './states';
 import { getTdmsClient } from '@/services';
+import { studentsApi } from '@/services/students-api';
 import { INTERFACE_NAMES } from '@/lib/interface-names';
 
 interface QuickFindResult {
@@ -72,19 +73,20 @@ export function QuickFind() {
     const timer = setTimeout(() => {
       void (async () => {
         const client = getTdmsClient();
+        // Students come from the database; courses still go through the client.
         const [students, courses] = await Promise.all([
-          client.listStudents({ search: value }),
+          studentsApi.list({ search: value, limit: 5 }).catch(() => ({ items: [] })),
           client.listCourses({ search: value }),
         ]);
         if (cancelled) return;
 
         const found: QuickFindResult[] = [
-          ...students.slice(0, 5).map((student) => ({
+          ...students.items.slice(0, 5).map((student) => ({
             id: `student-${student.id}`,
-            label: `${student.studentId} — ${student.firstName} ${student.lastName}`.trim(),
-            detail: `${student.qualificationCode} · ${student.group || 'No group'}`,
+            label: `${student.student_id} — ${student.first_name} ${student.last_name ?? ''}`.trim(),
+            detail: `${student.qualification_code} · ${student.group_code || 'No group'}`,
             area: INTERFACE_NAMES.singleStudentEntry,
-            href: `/students?tab=single-entry&studentId=${encodeURIComponent(student.studentId)}`,
+            href: `/students?tab=single-entry&studentId=${encodeURIComponent(student.student_id)}`,
             icon: Users,
           })),
           ...courses.slice(0, 4).map((course) => ({

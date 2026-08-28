@@ -55,6 +55,11 @@ export default function Error({
               Reference: {error.digest}
             </p>
           )}
+          {process.env.NODE_ENV === 'development' && error.message && (
+            <p className="mt-3 rounded-md bg-muted px-3 py-1.5 text-left font-mono text-[12px] text-muted-foreground">
+              {error.message}
+            </p>
+          )}
         </div>
 
         <div className="mt-7 flex flex-col gap-2 sm:flex-row sm:justify-center">

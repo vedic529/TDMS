@@ -8,10 +8,7 @@ import type {
   TdmsUser,
 } from '@/types/auth';
 import type { ActivityFilters, UserActivityRecord } from '@/types/activity';
-import type { ImportBatch, ImportResult } from '@/types/import';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
-import type { StudentFilters, StudentInput, StudentRecord } from '@/types/student';
-import type { TimetableFilters, TimetableInput, TimetableSession } from '@/types/timetable';
 import type { TrainerFilters, TrainerInput, TrainerRecord } from '@/types/trainer';
 
 import { getAuthProvider } from './auth';
@@ -23,7 +20,6 @@ import type {
   QualificationUnitFilters,
   QualificationUnitInput,
   ReasonedRequest,
-  StageImportRequest,
   TdmsClient,
   UserInput,
 } from './tdms-client';
@@ -90,135 +86,14 @@ export class ApiTdmsClient implements TdmsClient {
     return this.request<ReferenceDataBundle>('/reference-data');
   }
 
-  // -- Timetable View and Management ---------------------------------------
-  listTimetableSessions(filters: TimetableFilters): Promise<TimetableSession[]> {
-    const query = new URLSearchParams(
-      Object.entries(filters).filter(([, value]) => Boolean(value)) as [string, string][],
-    );
-    return this.request<TimetableSession[]>(`/timetable?${query.toString()}`);
-  }
-
-  createTimetableSession(input: TimetableInput, _context: ActionContext): Promise<TimetableSession> {
-    return this.request<TimetableSession>('/timetable', { method: 'POST', body: JSON.stringify(input) });
-  }
-
-  updateTimetableSession(id: string, input: TimetableInput, _context: ActionContext): Promise<TimetableSession> {
-    return this.request<TimetableSession>(`/timetable/${id}`, { method: 'PUT', body: JSON.stringify(input) });
-  }
-
-  async deleteTimetableSession(id: string, request: ReasonedRequest, _context: ActionContext): Promise<void> {
-    await this.request<void>(`/timetable/${id}`, { method: 'DELETE', body: JSON.stringify(request) });
-  }
-
-  listDeletedTimetableSessions(): Promise<TimetableSession[]> {
-    return this.request<TimetableSession[]>('/timetable/deleted');
-  }
-
-  restoreTimetableSession(
-    id: string,
-    request: ReasonedRequest,
-    _context: ActionContext,
-  ): Promise<TimetableSession> {
-    return this.request<TimetableSession>(`/timetable/${id}/restore`, {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
-
-  // -- Single Student Entry ------------------------------------------------
-  listStudents(filters: StudentFilters): Promise<StudentRecord[]> {
-    const query = new URLSearchParams(
-      Object.entries(filters).filter(([, value]) => Boolean(value)) as [string, string][],
-    );
-    return this.request<StudentRecord[]>(`/students?${query.toString()}`);
-  }
-
-  findStudentByStudentId(studentId: string): Promise<StudentRecord | null> {
-    return this.request<StudentRecord | null>(`/students/by-student-id/${encodeURIComponent(studentId)}`);
-  }
-
-  async isStudentIdAvailable(studentId: string, excludeRecordId?: string): Promise<boolean> {
-    const query = new URLSearchParams({ studentId, ...(excludeRecordId ? { excludeRecordId } : {}) });
-    const result = await this.request<{ available: boolean }>(`/students/availability?${query.toString()}`);
-    return result.available;
-  }
-
-  createStudent(input: StudentInput, _context: ActionContext): Promise<StudentRecord> {
-    return this.request<StudentRecord>('/students', { method: 'POST', body: JSON.stringify(input) });
-  }
-
-  updateStudent(id: string, input: StudentInput, _context: ActionContext): Promise<StudentRecord> {
-    return this.request<StudentRecord>(`/students/${id}`, { method: 'PUT', body: JSON.stringify(input) });
-  }
-
-  async deleteStudent(id: string, request: ReasonedRequest, _context: ActionContext): Promise<void> {
-    await this.request<void>(`/students/${id}`, { method: 'DELETE', body: JSON.stringify(request) });
-  }
-
-  listDeletedStudents(): Promise<StudentRecord[]> {
-    return this.request<StudentRecord[]>('/students/deleted');
-  }
-
-  restoreStudent(id: string, request: ReasonedRequest, _context: ActionContext): Promise<StudentRecord> {
-    return this.request<StudentRecord>(`/students/${id}/restore`, {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
-
-  // -- Bulk Student Import -------------------------------------------------
-  stageImport(request: StageImportRequest, _context: ActionContext): Promise<ImportBatch> {
-    return this.request<ImportBatch>('/student-imports/stage', {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
-
-  revalidateImport(batch: ImportBatch): Promise<ImportBatch> {
-    return this.request<ImportBatch>(`/student-imports/${batch.id}/revalidate`, {
-      method: 'POST',
-      body: JSON.stringify({ rows: batch.rows }),
-    });
-  }
-
-  saveImport(batch: ImportBatch, _context: ActionContext): Promise<ImportResult> {
-    return this.request<ImportResult>(`/student-imports/${batch.id}/save`, {
-      method: 'POST',
-      body: JSON.stringify({ rows: batch.rows }),
-    });
-  }
+  // -- Student Data --------------------------------------------------------
+  // Students and the bulk import are served by `students-api.ts`, which
+  // talks to the API directly rather than through this client.
 
   // -- Trainer Data --------------------------------------------------------
-  listTrainers(filters: TrainerFilters): Promise<TrainerRecord[]> {
-    if (!filters.qualificationCode) return Promise.resolve([]);
-    const query = new URLSearchParams(
-      Object.entries(filters).filter(([, value]) => Boolean(value)) as [string, string][],
-    );
-    return this.request<TrainerRecord[]>(`/trainers?${query.toString()}`);
-  }
-
-  createTrainer(input: TrainerInput, _context: ActionContext): Promise<TrainerRecord> {
-    return this.request<TrainerRecord>('/trainers', { method: 'POST', body: JSON.stringify(input) });
-  }
-
-  updateTrainer(id: string, input: TrainerInput, _context: ActionContext): Promise<TrainerRecord> {
-    return this.request<TrainerRecord>(`/trainers/${id}`, { method: 'PUT', body: JSON.stringify(input) });
-  }
-
-  async deleteTrainer(id: string, request: ReasonedRequest, _context: ActionContext): Promise<void> {
-    await this.request<void>(`/trainers/${id}`, { method: 'DELETE', body: JSON.stringify(request) });
-  }
-
-  listDeletedTrainers(): Promise<TrainerRecord[]> {
-    return this.request<TrainerRecord[]>('/trainers/deleted');
-  }
-
-  restoreTrainer(id: string, request: ReasonedRequest, _context: ActionContext): Promise<TrainerRecord> {
-    return this.request<TrainerRecord>(`/trainers/${id}/restore`, {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
+  // Removed 27 August 2026: trainers are served by `trainers-api.ts`, which
+  // talks to the API directly. The old `GET /trainers` call here pointed at an
+  // endpoint that did not exist and returned an empty array.
 
   // -- College and Course Reference Data -----------------------------------
   listCourses(filters: CourseFilters): Promise<CourseRecord[]> {

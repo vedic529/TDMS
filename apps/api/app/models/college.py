@@ -50,6 +50,10 @@ class Campus(Base):
     """
 
     __tablename__ = "campuses"
+    __table_args__ = (
+        # The Location Dictionary reads State then City then campus name.
+        Index("ix_campuses_state_city", "state", "city"),
+    )
 
     id: Mapped[int] = pk_column()
     # DBQ-15: a stable code is the identity, so a rename or rebrand does not
@@ -59,6 +63,15 @@ class Campus(Base):
     campus_location: Mapped[str] = mapped_column(Text, nullable=False)
     # SRS §6.1.3: the source of the student's State.
     state: Mapped[str] = mapped_column(Text, nullable=False)
+    # The Location Dictionary (approved 26 August 2026): State -> City -> Campus
+    # -> Full Address. Both nullable, because the campuses recorded before this
+    # have no city and no single approved address, and inventing either would be
+    # fabricating data — the dictionary reports "City not recorded" instead.
+    #
+    # `campus_location` is **not** repurposed for the city: the allocation
+    # importer's `campus_by_location` lookup and the export both read it.
+    city: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
     college_links: Mapped[list[CollegeCampus]] = relationship(back_populates="campus")

@@ -37,8 +37,24 @@ interface DataTableProps<T> {
   /** Rendered when there are no rows. */
   empty?: React.ReactNode;
   pageSize?: number;
+  /**
+   * Page through the server instead of the browser.
+   *
+   * When supplied, `rows` is already one page and the table renders it whole —
+   * it never slices — so a list too large to hold in memory still pages
+   * correctly. Without it the table keeps its own client-side pager.
+   */
+  serverPagination?: {
+    /** Zero-based. */
+    page: number;
+    pageSize: number;
+    total: number;
+    onPageChange: (page: number) => void;
+  };
   initialSort?: { columnId: string; direction: 'asc' | 'desc' };
   onRowClick?: (row: T) => void;
+  /** Highlights a row without showing selection checkboxes. */
+  activeRowKey?: string;
   selection?: {
     selectedIds: string[];
     onChange: (ids: string[]) => void;
@@ -58,8 +74,10 @@ export function DataTable<T>({
   loadingLabel,
   empty,
   pageSize = 15,
+  serverPagination,
   initialSort,
   onRowClick,
+  activeRowKey,
   selection,
   rowActions,
   className,
@@ -85,9 +103,22 @@ export function DataTable<T>({
     });
   }, [rows, sort, columns]);
 
-  const pageCount = Math.max(1, Math.ceil(sortedRows.length / pageSize));
-  const currentPage = Math.min(page, pageCount - 1);
-  const visibleRows = sortedRows.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
+  const serverPaged = serverPagination !== undefined;
+  const effectivePageSize = serverPagination?.pageSize ?? pageSize;
+  const totalRows = serverPagination?.total ?? sortedRows.length;
+  const pageCount = Math.max(1, Math.ceil(totalRows / effectivePageSize));
+  const currentPage = serverPaged ? serverPagination.page : Math.min(page, pageCount - 1);
+  // Server-paged rows are already one page: slicing them again would hide
+  // records that were fetched precisely to be shown.
+  const visibleRows = serverPaged
+    ? sortedRows
+    : sortedRows.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
+
+  function goToPage(next: number) {
+    const bounded = Math.max(0, Math.min(pageCount - 1, next));
+    if (serverPaged) serverPagination.onPageChange(bounded);
+    else setPage(bounded);
+  }
 
   const allVisibleSelected =
     !!selection && visibleRows.length > 0 && visibleRows.every((row) => selection.selectedIds.includes(rowKey(row)));
@@ -168,7 +199,7 @@ export function DataTable<T>({
           <TableBody>
             {visibleRows.map((row) => {
               const key = rowKey(row);
-              const selected = selection?.selectedIds.includes(key) ?? false;
+              const selected = (selection?.selectedIds.includes(key) ?? false) || activeRowKey === key;
               return (
                 <TableRow
                   key={key}
@@ -214,15 +245,15 @@ export function DataTable<T>({
       {pageCount > 1 && (
         <nav className="flex items-center justify-between gap-3" aria-label="Table pagination">
           <p className="text-[13px] text-muted-foreground">
-            Showing {currentPage * pageSize + 1}–{Math.min((currentPage + 1) * pageSize, sortedRows.length)} of{' '}
-            {sortedRows.length}
+            Showing {totalRows === 0 ? 0 : currentPage * effectivePageSize + 1}–
+            {Math.min((currentPage + 1) * effectivePageSize, totalRows)} of {totalRows}
           </p>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setPage((value) => Math.max(0, value - 1))}
-              disabled={currentPage === 0}
+              onClick={() => goToPage(currentPage - 1)}
+              disabled={currentPage === 0 || loading}
             >
               <ChevronLeft aria-hidden="true" />
               Previous
@@ -233,8 +264,8 @@ export function DataTable<T>({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
-              disabled={currentPage >= pageCount - 1}
+              onClick={() => goToPage(currentPage + 1)}
+              disabled={currentPage >= pageCount - 1 || loading}
             >
               Next
               <ChevronRight aria-hidden="true" />
