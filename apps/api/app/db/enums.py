@@ -53,7 +53,11 @@ student_status = _pg_enum(
 student_intake_match = _pg_enum("MATCHED", "TBD", "NOT_APPLICABLE", name="student_intake_match")
 
 # -- Reference data ----------------------------------------------------------
-uoc_type = _pg_enum("THEORY", "THEORY_AND_PRACTICAL", name="uoc_type")
+# `PRACTICAL` added 10 September 2026. A unit that is entirely practical had
+# no honest value: `THEORY_AND_PRACTICAL` asserts theory it does not have.
+# `uoc_type_allocation` below has always had `PRACTICAL_ONLY`, so a class
+# could be scheduled that way while the unit could not be described that way.
+uoc_type = _pg_enum("THEORY", "THEORY_AND_PRACTICAL", "PRACTICAL", name="uoc_type")
 
 # -- Delivery ----------------------------------------------------------------
 mode_of_delivery = _pg_enum("PHYSICAL", "VIRTUAL", name="mode_of_delivery")

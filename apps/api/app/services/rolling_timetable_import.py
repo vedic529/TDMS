@@ -14,11 +14,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.orm import Session
 
 from app.db.enums import TRAINING_PACKAGE_VALUES
-from app.models.qualification import Unit
+from app.models.qualification import Qualification, Unit
 from app.models.timetable import RollingTimetableWeek
 from app.models.user import User
 from app.services.activity import record_activity
@@ -66,6 +66,7 @@ KIND_UNKNOWN_UNIT = "unit_code_not_in_register"
 KIND_DURATION_ALREADY_STORED = "qualification_stored_under_other_duration"
 KIND_INTAKE_WITHOUT_UNIT = "intake_has_no_unit"
 KIND_DURATION_SPAN = "duration_disagrees_with_delivery_span"
+KIND_UNKNOWN_QUALIFICATION = "qualification_not_in_reference_data"
 
 REFUSE_KINDS = {
     KIND_MISSING_HEADER,
@@ -80,6 +81,13 @@ REFUSE_KINDS = {
     KIND_WEEK_GAP,
     KIND_DERIVED_DATE,
     KIND_EMPTY_FOR_PACKAGE,
+    # College and Course Reference Data is the source. A rolling timetable for a
+    # qualification that reference data does not hold is not a gap to queue - it
+    # is a timetable for a course this system does not run, and storing it would
+    # put teaching weeks behind a qualification nobody can offer, enrol into or
+    # find. A missing *unit* is a gap and raises a suggestion; a missing
+    # qualification is a problem and refuses the file.
+    KIND_UNKNOWN_QUALIFICATION,
 }
 
 # Visualizer query cost: one SELECT. Proven in tests/test_rolling_timetable_import.py.
@@ -181,6 +189,74 @@ class ImportApplyResult:
     qualifications_replaced: list[str]
     qualifications_skipped: list[str]
     rows_read: int
+
+
+#: (qualification, unit) pairs the stored rolling timetable teaches without a
+#: membership row in College and Course Reference Data.
+#:
+#: Every row here is genuinely outstanding: `rolling_timetable_weeks` holds the
+#: qualification and unit as text with no foreign keys, so nothing links them to
+#: reference data until the membership exists. That is what lets the suggestion
+#: raised from this satisfy the queue rule - it has stored rows behind it, and
+#: the moment the membership is added the count falls to zero and the entry
+#: closes itself.
+MEMBERSHIP_GAPS = text(
+    # Raw string: `\s` is a PostgreSQL regex escape, not a Python one.
+    r"""
+    SELECT w.qualification_code, w.unit_code, count(*) AS week_rows
+      FROM rolling_timetable_weeks w
+      LEFT JOIN units u
+             ON upper(btrim(regexp_replace(u.unit_code, '\s+', ' ', 'g')))
+              = upper(btrim(regexp_replace(w.unit_code, '\s+', ' ', 'g')))
+      LEFT JOIN qualifications q
+             ON upper(btrim(regexp_replace(q.qualification_code, '\s+', ' ', 'g')))
+              = upper(btrim(regexp_replace(w.qualification_code, '\s+', ' ', 'g')))
+      LEFT JOIN qualification_units qu
+             ON qu.qualification_id = q.id AND qu.unit_id = u.id
+     WHERE w.schedule_type = 'UNIT'
+       AND coalesce(btrim(w.unit_code), '') <> ''
+       AND qu.id IS NULL
+       -- Cast both sides: `training_package` is an enum and the parameter is
+       -- NULL when every package is wanted, which Postgres cannot type on its own.
+       AND (cast(:package as text) IS NULL OR cast(w.training_package as text) = cast(:package as text))
+     GROUP BY w.qualification_code, w.unit_code
+     ORDER BY w.qualification_code, w.unit_code
+    """
+)
+
+
+def raise_membership_gaps(session: Session, *, training_package: str | None = None) -> int:
+    """Queue every unit the stored rolling timetable teaches but reference data omits.
+
+    Called by `apply_rows`, so importing a rolling timetable surfaces its own
+    gaps. Before this it was a separate script nobody was obliged to run: a
+    timetable could be imported teaching units no qualification lists, and the
+    only trace was a warning in a console.
+
+    A missing unit is a gap rather than a fault - the timetable is teaching
+    something real and reference data has not caught up - so it is queued for a
+    decision and the timetable is still stored. A missing *qualification* refuses
+    the file instead; see KIND_UNKNOWN_QUALIFICATION.
+
+    The scope is the qualification, so the same unit outstanding under two
+    qualifications is two decisions, which is correct: whether one qualification
+    teaches a unit says nothing about another.
+    """
+    from app.services.reference_suggestions import raise_reference_suggestion
+
+    raised = 0
+    for qualification_code, unit_code, _week_rows in session.execute(
+        MEMBERSHIP_GAPS, {"package": training_package}
+    ):
+        raise_reference_suggestion(
+            session,
+            entity_type="UNIT",
+            raw_value=str(unit_code),
+            context={"qualification": str(qualification_code)},
+            source="ROLLING_IMPORT",
+        )
+        raised += 1
+    return raised
 
 
 class RollingImportError(ValueError):
@@ -743,6 +819,27 @@ def validate_bytes(
             )
         )
 
+    approved_qualifications = {
+        str(code).strip().upper()
+        for (code,) in session.execute(select(Qualification.qualification_code)).all()
+        if code
+    }
+    for summary in _summaries(matching):
+        if summary.qualification_code.strip().upper() in approved_qualifications:
+            continue
+        issues.append(
+            Discrepancy(
+                KIND_UNKNOWN_QUALIFICATION,
+                "error",
+                None,
+                "qualification_code",
+                summary.qualification_code,
+                f"{summary.qualification_code} is not in College and Course Reference Data "
+                f"({summary.row_count} rows). Add the qualification there first - a rolling "
+                "timetable cannot introduce one.",
+            )
+        )
+
     approved_units = {code for (code,) in session.execute(select(Unit.unit_code)).all()}
     unknown_counts: dict[str, int] = defaultdict(int)
     for row in matching:
@@ -932,21 +1029,23 @@ def apply_rows(
         session.execute(insert(RollingTimetableWeek), mappings)
         session.flush()
 
-    from app.services.allocation_import import _raise_or_count_suggestion, _upsert_suggestions
+    # Raised after the rows are stored, never before: the gap is a fact about
+    # what is now in the database, and an entry raised against rows that were
+    # not written would have nothing behind it.
+    suggestions_raised = raise_membership_gaps(session, training_package=package)
 
-    approved_units = {code for (code,) in session.execute(select(Unit.unit_code)).all()}
-    unit_suggestions: dict[tuple, dict] = {}
-    for row in matching:
-        if row.schedule_type != TYPE_UNIT or not row.unit_code:
-            continue
-        stored = row.unit_code
-        members = [part.strip() for part in stored.split("/") if part.strip()]
-        known = stored in approved_units or (len(members) > 1 and all(part in approved_units for part in members))
-        if known:
-            continue
-        _raise_or_count_suggestion(unit_suggestions, "UNIT", stored, {"training_package": package})
-    if unit_suggestions:
-        _upsert_suggestions(session, unit_suggestions, dt.datetime.now(dt.timezone.utc))
+    # A second, package-scoped raiser used to run here, queuing any unit absent
+    # from the register under {"training_package": ...}. It is replaced by
+    # `raise_membership_gaps` above, which is a superset - a unit missing from
+    # the register has no membership either - and which scopes the entry to the
+    # qualification instead.
+    #
+    # The scope is the difference that matters. A package-scoped entry names no
+    # qualification, so nothing can act on it: adding a unit needs to know which
+    # qualification to add it to. It also split composite codes like "A/B" and
+    # accepted them when both halves were known; no such code exists in the
+    # stored timetable, and if one appears it should be queued rather than
+    # quietly accepted as two units it is not.
 
     skipped = [item.qualification_code for item in review.non_matching_qualifications]
     replaced = sorted({code for code, _duration in loops})
@@ -956,7 +1055,8 @@ def apply_rows(
     detail = (
         f"Imported {file_name} under {package}: read {review.rows_read}, "
         f"wrote {len(mappings)}, replaced {', '.join(replaced) or 'none'}, "
-        f"skipped {', '.join(skipped) or 'none'}. Discrepancies: {dict(kind_counts) or 'none'}."
+        f"skipped {', '.join(skipped) or 'none'}. Discrepancies: {dict(kind_counts) or 'none'}. "
+        f"Unit membership gaps queued: {suggestions_raised}."
     )
     record_activity(
         session,

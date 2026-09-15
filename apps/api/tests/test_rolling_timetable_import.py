@@ -16,6 +16,7 @@ from app.auth.mock import mock_claims_for
 from app.core.config import Settings, get_settings
 from app.main import app
 from app.models.activity import UserActivityRecord
+from app.models.qualification import Qualification
 from app.models.timetable import RollingTimetableWeek
 from app.models.user import User
 from app.services.rolling_timetable_import import (
@@ -116,10 +117,43 @@ def as_user(email: str) -> dict[str, str]:
     return {"X-TDMS-Mock-User": email}
 
 
+#: Every qualification code these tests put in a rolling timetable file.
+#:
+#: A rolling timetable naming a qualification College and Course Reference Data
+#: does not hold is refused (KIND_UNKNOWN_QUALIFICATION), so the fixtures have to
+#: supply what the files reference. `CHC30121` is deliberately included even
+#: though it is superseded in the real data - one test uses it to check package
+#: routing, and that test is about the package, not the supersession.
+ROLLING_TEST_QUALIFICATIONS = (
+    "BSB50120",
+    "BSB50420",
+    "BSB80120",
+    "CHC30121",
+    "FNS40222",
+    "FNS60222",
+)
+
+
 @pytest.fixture(autouse=True)
 def clear_rolling(session):
     session.rollback()
     session.execute(text("TRUNCATE TABLE rolling_timetable_weeks RESTART IDENTITY CASCADE"))
+
+    # Get-or-create, never delete: `qualifications` is shared with every other
+    # test module and is not in the truncate set, so removing a row here would
+    # break whichever test happens to run next.
+    for code in ROLLING_TEST_QUALIFICATIONS:
+        exists = session.execute(
+            select(Qualification).where(Qualification.qualification_code == code)
+        ).scalars().first()
+        if exists is None:
+            session.add(
+                Qualification(
+                    qualification_code=code,
+                    qualification_title=f"{code} (rolling timetable test fixture)",
+                    is_active=True,
+                )
+            )
     session.commit()
 
 

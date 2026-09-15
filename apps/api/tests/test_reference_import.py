@@ -282,8 +282,24 @@ class TestImport:
             (3, "TSTUNITB"),
         ]
 
-    def test_disagreeing_unit_sets_are_reported_not_merged(self, client, seed, session):
-        """One qualification code, two RTOs, different units — a real conflict."""
+    def test_disagreeing_unit_sets_store_the_union_and_are_still_reported(
+        self, client, seed, session
+    ):
+        """One qualification code, two RTOs, different units.
+
+        Amended 8 September 2026. This previously asserted that nothing was
+        written — the qualification was skipped entirely on a disagreement. In
+        the real data that affected the only two qualifications of 53 where
+        colleges differ, CHC33021 and UEE60220, and left both teaching no units
+        at all. Refusing to choose produced the one answer certain to be wrong.
+
+        Inspecting those two shows elective streams on a common core (12 of 18
+        shared, 41 of 51), not contradictory data, so every unit any college
+        lists is stored and all colleges share the set.
+
+        The conflict is still reported: the disagreement stopped being a
+        blocker, it did not stop being a fact.
+        """
         quals = [
             qualification_row(**{"RTO": "RTOONE", "Unit Code": "TSTUNITA"}),
             qualification_row(**{"RTO": "RTOTWO", "Unit Code": "TSTUNITB"}),
@@ -294,7 +310,7 @@ class TestImport:
         session.commit()
 
         assert [i.identifier for i in report.qualification_units.conflicts] == ["TSTQUAL01"]
-        assert session.query(QualificationUnit).count() == 0
+        assert session.query(QualificationUnit).count() == 2
 
     def test_two_course_codes_for_one_offering_are_reported(self, client, seed, session):
         """COL-04 allows one offering; the discarded code must not vanish silently."""

@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models.college import Campus, College, CollegeCampus
 from app.models.course import CourseOffering, CourseStatus, OfferingDurationOption
+from app.models.facility import Facility, FacilityCollege, FacilityFaculty
 from app.models.qualification import Qualification, QualificationUnit, Unit
 from app.models.reason import ReasonCode
 from app.models.user import User
@@ -889,15 +890,27 @@ def restore_qualification_unit(
 
 
 def _reject_duplicate_sequence(
-    session: Session, qualification_id: int, delivery_order: int, *, exclude_id: int | None = None
+    session: Session,
+    qualification_id: int,
+    delivery_order: int | None,
+    *,
+    exclude_id: int | None = None,
 ) -> None:
     """Mirror `uq_qualification_units_qualification_id_delivery_order`.
+
+    `None` is not a duplicate of anything. The unique constraint treats NULLs as
+    distinct, so any number of units may belong to a qualification with no
+    stored order - which is the normal case now that a position comes only from
+    an approved rolling timetable.
 
     Deleted rows are **included**, because the approved constraint is not
     partial: a soft-deleted row keeps its slot so that restoring it cannot
     collide. A pre-check that excluded them would tell the user the order is
     free and then fail at commit — worse than refusing up front.
     """
+    if delivery_order is None:
+        return
+
     stmt = select(QualificationUnit.id).where(
         QualificationUnit.qualification_id == qualification_id,
         QualificationUnit.delivery_order == delivery_order,
@@ -1358,3 +1371,77 @@ def _flush_translating_conflicts(session: Session, label: str, value: str) -> No
         if "check constraint" in text:
             raise InvalidReference("That value is not allowed by the approved business rules.") from exc
         raise
+
+
+# ---------------------------------------------------------------------------
+# Facilities
+# ---------------------------------------------------------------------------
+
+
+def create_facility(session: Session, actor: User, payload: schemas.FacilityCreate) -> Facility:
+    """Write a room, the colleges that may use it and the faculty rules, together.
+
+    Three tables, one call, one transaction. A room written without its links
+    exists but is usable by nobody and appears in no filtered list, so splitting
+    this into separate requests would allow exactly the half-created state the
+    Facility Data tab cannot show or repair.
+
+    `source_location` defaults to the campus address. The column separates two
+    buildings on one campus - it is what distinguishes `Room 4` in one from
+    `Room 4` in the other - and a person adding a single room usually has no
+    second building in mind. Defaulting keeps the unique key meaningful without
+    asking for a value that would be invented.
+    """
+    campus = session.get(Campus, payload.campus_id)
+    if campus is None:
+        raise InvalidReference("That campus is not an approved record.")
+
+    source_location = payload.source_location.strip() or campus.campus_location
+
+    facility = Facility(
+        facility_reference=payload.facility_reference.strip(),
+        campus_id=payload.campus_id,
+        source_location=source_location,
+        facility_type=payload.facility_type.strip(),
+        capacity=payload.capacity,
+        room_classification=(payload.room_classification or "").strip() or None,
+        is_active=payload.is_active,
+    )
+    session.add(facility)
+    _flush_translating_conflicts(session, "Room", payload.facility_reference)
+
+    for college_id in dict.fromkeys(payload.college_ids):
+        if session.get(College, college_id) is None:
+            raise InvalidReference("One of those colleges is not an approved record.")
+        session.add(FacilityCollege(facility_id=facility.id, college_id=college_id))
+
+    for rule in payload.faculties:
+        session.add(
+            FacilityFaculty(
+                facility_id=facility.id,
+                faculty=rule.faculty.strip(),
+                monday=rule.monday,
+                tuesday=rule.tuesday,
+                wednesday=rule.wednesday,
+                thursday=rule.thursday,
+                friday=rule.friday,
+                remarks=(rule.remarks or "").strip() or None,
+            )
+        )
+
+    _flush_translating_conflicts(session, "Room", payload.facility_reference)
+
+    _log(
+        session,
+        actor=actor,
+        action="CREATE",
+        page=PAGE_REFERENCE,
+        record=facility.facility_reference,
+        detail=(
+            f"Room created: {facility.facility_reference} at {campus.campus_name}, "
+            f"{facility.capacity} seats, {facility.facility_type}"
+            + (f", {facility.room_classification}" if facility.room_classification else "")
+            + f". Colleges: {len(payload.college_ids)}. Faculty rules: {len(payload.faculties)}."
+        ),
+    )
+    return facility

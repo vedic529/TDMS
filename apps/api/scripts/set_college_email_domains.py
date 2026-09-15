@@ -31,12 +31,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings  # noqa: E402
 from app.models.college import College  # noqa: E402
 
-#: Full legal names, supplied by the project owner on 13 August 2026.
+#: Full legal names, supplied by the project owner on 13 August 2026;
+#: `AIBT-I` on 7 September 2026.
 #:
 #: Until now `college_full_name` held the short name, because no supplied file
-#: contained the legal names and inventing one was not an option.
+#: contained the legal names and inventing one was not an option. `AIBT-I` is
+#: still in that position for its domain, which has not been supplied — the two
+#: facts are applied independently so a known name is not held back by an
+#: unknown domain.
 APPROVED_FULL_NAMES = {
     "AIBT": "Australia Institute of Business and Technology",
+    "AIBT-I": "Australia Institute of Business & Technology – International",
     "AVTA": "Australian Vocational Training Academy",
     "BIC": "Brooklyn International College Australia",
     "HJ": "HJ Australian Institute",
@@ -55,6 +60,10 @@ APPROVED_FULL_NAMES = {
 #: which are governed by the Entra tenant rules and must stay separate.
 APPROVED_DOMAINS = {
     "AIBT": "aibtglobal.edu.au",
+    # Supplied 7 September 2026. Note it is not AIBT's `aibtglobal.edu.au`:
+    # AIBT-I is a separate college and a student address on one domain does not
+    # place the student at the other.
+    "AIBT-I": "aibti.edu.au",
     "AVTA": "avta.edu.au",
     "BIC": "brooklyn.edu.au",
     "HJ": "hjaustralianinstitute.edu.au",
@@ -80,27 +89,34 @@ def main() -> int:
             c.college_short_name: c for c in session.execute(select(College)).scalars()
         }
 
-        for short_name, domain in sorted(APPROVED_DOMAINS.items()):
+        # A name and a domain are separate approvals and arrive separately.
+        # Iterating the domains alone would leave a college whose legal name is
+        # known but whose domain is not still displaying its short name.
+        for short_name in sorted(set(APPROVED_FULL_NAMES) | set(APPROVED_DOMAINS)):
             college = colleges.get(short_name)
             if college is None:
                 missing.append(short_name)
                 print(f"  {short_name:6} SKIPPED — no such college in the reference data")
                 continue
+
             full_name = APPROVED_FULL_NAMES.get(short_name)
             if full_name and college.college_full_name != full_name:
                 print(f"  {short_name:6} name   {college.college_full_name!r} -> {full_name!r}")
                 college.college_full_name = full_name
 
-            before = college.email_domain or "(empty)"
-            if college.email_domain == domain:
+            domain = APPROVED_DOMAINS.get(short_name)
+            if domain is None:
+                print(f"  {short_name:6} NO DOMAIN SUPPLIED — left empty, not guessed")
+            elif college.email_domain == domain:
                 print(f"  {short_name:6} domain unchanged  {domain}")
-                continue
-            college.email_domain = domain
-            print(f"  {short_name:6} domain {before} -> {domain}")
+            else:
+                before = college.email_domain or "(empty)"
+                college.email_domain = domain
+                print(f"  {short_name:6} domain {before} -> {domain}")
 
-        unlisted = sorted(set(colleges) - set(APPROVED_DOMAINS))
+        unlisted = sorted(set(colleges) - set(APPROVED_FULL_NAMES) - set(APPROVED_DOMAINS))
         for short_name in unlisted:
-            print(f"  {short_name:6} NO DOMAIN SUPPLIED — left empty, not guessed")
+            print(f"  {short_name:6} NOT LISTED — no approved name or domain supplied")
 
         if args.apply:
             session.commit()

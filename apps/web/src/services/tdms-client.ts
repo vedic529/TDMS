@@ -54,7 +54,27 @@ export interface QualificationUnitFilters {
 }
 
 export type CourseInput = Omit<CourseRecord, 'id' | 'isDeleted' | 'deletion'>;
-export type QualificationUnitInput = Omit<QualificationUnitSequence, 'id' | 'isDeleted' | 'deletion'>;
+// `deliveryOrder` is not an input. The teaching order comes from an approved
+// rolling timetable, never from someone typing a number - and once groups run
+// their own cycle of the same units, one number could only be right for one
+// group. The row type still carries it, because the API still returns it.
+// What a person actually decides when adding a unit to a qualification.
+//
+// A complete `qualification_units` row is two columns: the qualification and the
+// unit. Everything else is generated or optional, so nothing else is asked for.
+//
+// `recordId` is not an input and never was - there is no `record_id` column. The
+// list adapter renders it from the row's own primary key, and the form used to
+// ask a person to invent one that the API then ignored.
+//
+// `collegeId` and `campusId` are not inputs either. Unit membership belongs to
+// the qualification, not to a place - the model says so ("one sequence per
+// qualification, not per campus") - so a unit added once applies everywhere that
+// qualification is offered.
+export type QualificationUnitInput = Omit<
+  QualificationUnitSequence,
+  'id' | 'isDeleted' | 'deletion' | 'deliveryOrder' | 'recordId' | 'collegeId' | 'campusId'
+>;
 export type UserInput = Omit<TdmsUser, 'id' | 'lastSignInAt'>;
 
 

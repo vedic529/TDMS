@@ -126,12 +126,19 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
         #   2. at most one ACTIVE live row per student. A student cannot be
         #      actively enrolled twice, but may hold one ACTIVE plus other
         #      statuses across different offerings (checks D6, D7).
+        # `postgresql_nulls_not_distinct` (Students hold unverified references,
+        # 8 September 2026): `course_offering_id` is nullable now, and SQL treats
+        # two NULLs as different values - so without this the same student could
+        # be written unverified once per import. NULL counts as one offering,
+        # which restores the original intent of one live row per student per
+        # offering.
         Index(
             "uq_students_student_id_course_offering_id",
             "student_id",
             "course_offering_id",
             unique=True,
             postgresql_where=text("is_deleted = false"),
+            postgresql_nulls_not_distinct=True,
         ),
         Index(
             "uq_students_one_active_enrolment",
@@ -153,6 +160,15 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
             postgresql_where=text("is_deleted = false"),
         ),
         Index("ix_students_last_name_first_name", "last_name", "first_name"),
+        # A student with no offering must record what it was reaching for, or no
+        # later resolve can ever repair it.
+        CheckConstraint(
+            "course_offering_id IS NOT NULL"
+            " OR college_text IS NOT NULL"
+            " OR campus_text IS NOT NULL"
+            " OR qualification_text IS NOT NULL",
+            name="offering_or_reference_text",
+        ),
     )
 
     id: Mapped[int] = pk_column()
@@ -167,9 +183,23 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
         BigInteger, ForeignKey("student_groups.id", ondelete="RESTRICT"), nullable=True
     )
     # Carries college, campus and qualification for this student.
-    course_offering_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("course_offerings.id", ondelete="RESTRICT"), nullable=False
+    #
+    # Nullable since 8 September 2026. NULL means "not known yet", never "none":
+    # the offering is derived from college + campus + qualification, so a student
+    # naming a campus reference data has not caught up with is stored with its
+    # text and completed when the suggestion resolves - the same shape
+    # `allocation_delivery` has always had. A row missing a *required* field is
+    # still refused; unverified is not incomplete.
+    course_offering_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("course_offerings.id", ondelete="RESTRICT"), nullable=True
     )
+
+    # What the file said, kept whether or not it resolved - exactly as the
+    # delivery text columns are. They are the evidence a suggestion is raised
+    # from, and the only value a later resolve can match on.
+    college_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    campus_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    qualification_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Staff-selected approved option (DBQ-01). The FK guarantees the option
     # belongs to the student's own offering.
     course_duration_option_id: Mapped[int | None] = mapped_column(

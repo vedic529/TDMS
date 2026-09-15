@@ -108,7 +108,25 @@ export function toCourseRecord(row: ApiCourse): CourseRecord {
 
 /** SRS §5.3 UoC Type. The API uses the enum spelling; the interface uses prose. */
 function toUocType(value: string | null): UocType {
-  return value === 'THEORY_AND_PRACTICAL' ? 'Theory and Practical' : 'Theory';
+  if (value === 'THEORY_AND_PRACTICAL') return 'Theory and Practical';
+  if (value === 'PRACTICAL') return 'Practical';
+  return 'Theory';
+}
+
+/**
+ * The enum spelling to send back.
+ *
+ * The counterpart to `toUocType`, and it was missing. Values arrived translated
+ * and went out untranslated, so a form sending `Theory` was rejected by
+ * `uoc_type`, whose only values are `THEORY` and `THEORY_AND_PRACTICAL`. The
+ * API types the field as a plain string, so nothing caught it before Postgres
+ * did.
+ */
+export function fromUocType(value: UocType | null | undefined): string | null {
+  if (!value) return null;
+  if (value === 'Theory and Practical') return 'THEORY_AND_PRACTICAL';
+  if (value === 'Practical') return 'PRACTICAL';
+  return 'THEORY';
 }
 
 export function toQualificationUnit(

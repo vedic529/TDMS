@@ -59,6 +59,33 @@ export interface SuggestionSummaryRow {
   exceptions: number;
 }
 
+/** One record a suggestion could be mapped to. */
+export interface MapOption {
+  id: number;
+  label: string;
+  /** Tells two similar records apart - for a room, the building. */
+  detail: string | null;
+  /** Inside the scope the entry was raised with. */
+  in_scope: boolean;
+}
+
+/**
+ * What a suggestion could be mapped to, narrowed by its context: a unit's
+ * qualification, a room's campus, a location's college.
+ */
+export interface MapOptions {
+  suggestion_id: number;
+  entity_type: SuggestionEntityType;
+  scope_label: string | null;
+  /** The college, qualification or campus the scope resolved to. */
+  scope_id: number | null;
+  /** The list holds the scope and nothing else - rooms at one campus. */
+  scope_only: boolean;
+  items: MapOption[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface AffectedRecords {
   suggestion_id: number;
   entity_type: SuggestionEntityType;
@@ -125,10 +152,28 @@ export const suggestionsApi = {
   affected: (suggestionId: number, limit = 50) =>
     request<AffectedRecords>(`/suggestions/${suggestionId}/affected?limit=${limit}`),
 
-  resolve: (suggestionId: number, action: SuggestionAction, resolvedEntityId?: number) =>
+  mapOptions: (suggestionId: number, search = '', limit = 50) => {
+    const term = search.trim();
+    const query = term ? `&search=${encodeURIComponent(term)}` : '';
+    return request<MapOptions>(
+      `/suggestions/${suggestionId}/map-options?limit=${limit}${query}`,
+    );
+  },
+
+  resolve: (
+    suggestionId: number,
+    action: SuggestionAction,
+    resolvedEntityId?: number,
+    /** Fields for a record CREATE must bring into existence, e.g. a unit title. */
+    createValues?: Record<string, string>,
+  ) =>
     request<SuggestionResolveResult>(`/suggestions/${suggestionId}/resolve`, {
       method: 'POST',
-      body: JSON.stringify({ action, resolved_entity_id: resolvedEntityId ?? null }),
+      body: JSON.stringify({
+        action,
+        resolved_entity_id: resolvedEntityId ?? null,
+        create_values: createValues ?? null,
+      }),
     }),
 };
 

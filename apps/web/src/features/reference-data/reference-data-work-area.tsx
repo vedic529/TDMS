@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { BookOpen, DoorOpen, GraduationCap, ListOrdered, Pencil, Plus, Trash2 } from 'lucide-react';
+import { BookOpen, DoorOpen, GraduationCap, MapPin, Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -12,15 +12,17 @@ import { PageHeader } from '@/components/common/page-header';
 import { FilterBar, FilterField } from '@/components/common/filter-bar';
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
-import { EmptyState, ErrorState, PendingRuleNotice, ReadOnlyNotice } from '@/components/common/states';
+import { EmptyState, ErrorState, ReadOnlyNotice } from '@/components/common/states';
 import { CourseStatusBadge } from '@/components/common/status-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { DeleteConfirmationDialog } from '@/components/common/delete-confirmation-dialog';
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { CourseFormDrawer } from './course-form-drawer';
+import { CourseFormDialog } from './course-form-dialog';
+import { LocationFormDialog } from './location-form-dialog';
 import { FacilityDataPanel } from './facility-data-panel';
 import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
-import { SuggestionIndicator } from '@/features/shared/suggestion-indicator';
+import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
 import { useReferenceLookups } from './use-reference-lookups';
 import { useCascadingFilters } from './use-cascading-filters';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
@@ -61,11 +63,11 @@ export function ReferenceDataWorkArea() {
       >
         <TabsList>
           <TabsTrigger value="course-data">
-            <BookOpen aria-hidden="true" />
+            <MapPin aria-hidden="true" />
             {INTERFACE_NAMES.courseData}
           </TabsTrigger>
           <TabsTrigger value="qualification-unit-sequence">
-            <ListOrdered aria-hidden="true" />
+            <BookOpen aria-hidden="true" />
             {INTERFACE_NAMES.qualificationUnitSequence}
           </TabsTrigger>
           <TabsTrigger value="facility-data">
@@ -102,6 +104,27 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
   const [rows, setRows] = React.useState<CourseRecord[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [formOpen, setFormOpen] = React.useState(false);
+  const [locationOpen, setLocationOpen] = React.useState(false);
+
+  // Adding a location or a qualification from a suggestion opens this tab's own
+  // form, filled in from the entry, and resolves the entry when it saves.
+  const fromSuggestion = useAddFromSuggestion();
+  const locationPrefill = React.useMemo(
+    () =>
+      fromSuggestion.suggestion?.entity_type === 'CAMPUS'
+        ? {
+            name: fromSuggestion.suggestion.raw_value,
+            college: String(fromSuggestion.suggestion.context?.college ?? ''),
+          }
+        : null,
+    [fromSuggestion.suggestion],
+  );
+  const qualificationPrefill = React.useMemo(() => {
+    if (fromSuggestion.suggestion?.entity_type !== 'QUALIFICATION') return null;
+    const value = fromSuggestion.suggestion.raw_value.trim();
+    // A national code has three letters and five digits; anything else is a title.
+    return /^[A-Z]{3}\d{5}$/i.test(value) ? { vetCode: value } : { title: value };
+  }, [fromSuggestion.suggestion]);
   const [editing, setEditing] = React.useState<CourseRecord | null>(null);
   const [deleting, setDeleting] = React.useState<CourseRecord | null>(null);
   const [busy, setBusy] = React.useState(false);
@@ -303,7 +326,22 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         }}
         trailing={
           <>
-            <SuggestionIndicator entityTypes={['COLLEGE', 'CAMPUS']} onResolved={() => void load()} />
+            <SuggestionIndicator
+              key={fromSuggestion.epoch}
+              // Qualification entries live here now: Add Qualification is this
+              // tab's form. A college cannot be created, so it is mapped only.
+              entityTypes={['COLLEGE', 'CAMPUS', 'QUALIFICATION']}
+              onResolved={() => void load()}
+              onAdd={(row) => {
+                fromSuggestion.start(row);
+                if (row.entity_type === 'CAMPUS') {
+                  setLocationOpen(true);
+                } else {
+                  setEditing(null);
+                  setFormOpen(true);
+                }
+              }}
+            />
             <ExportMenu
               rows={rows}
               baseFileName={`tdms-course-data-${today()}`}
@@ -337,6 +375,10 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
                   <Trash2 aria-hidden="true" />
                   Deleted Records
                 </Button>
+                <Button size="sm" onClick={() => setLocationOpen(true)}>
+                  <MapPin aria-hidden="true" />
+                  Add Location
+                </Button>
                 <Button
                   size="sm"
                   onClick={() => {
@@ -345,7 +387,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
                   }}
                 >
                   <Plus aria-hidden="true" />
-                  Create Course
+                  Add Qualification
                 </Button>
               </>
             )}
@@ -419,7 +461,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
             <EmptyState
               title="No course matches the selected filters."
               description="Change the college, campus or search filter to see more records."
-              icon={BookOpen}
+              icon={MapPin}
             />
           ) : (
             <EmptyState
@@ -429,7 +471,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
                   ? 'Select Add Course Record to enter the first approved course.'
                   : 'No approved course records are currently available.'
               }
-              icon={BookOpen}
+              icon={MapPin}
             />
           )
         }
@@ -462,14 +504,42 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         }
       />
 
-      <CourseFormDrawer
-        open={formOpen}
+      {/* Editing keeps the drawer: it edits an offering in place and is a
+          different job from adding one. Adding is a dialog, and asks only for
+          the offering's own facts - everything about the qualification comes
+          with the qualification. */}
+      {editing ? (
+        <CourseFormDrawer
+          open={formOpen}
+          onOpenChange={(open) => {
+            setFormOpen(open);
+            if (!open) setEditing(null);
+          }}
+          editing={editing}
+          existingCourses={rows}
+          onSaved={() => void load()}
+        />
+      ) : (
+        <CourseFormDialog
+          open={formOpen}
+          onOpenChange={(open) => {
+            setFormOpen(open);
+            if (!open) fromSuggestion.cancel();
+          }}
+          prefill={qualificationPrefill}
+          onCreated={(id) => void fromSuggestion.finish(id).then(() => load())}
+          onSaved={() => void load()}
+        />
+      )}
+
+      <LocationFormDialog
+        open={locationOpen}
         onOpenChange={(open) => {
-          setFormOpen(open);
-          if (!open) setEditing(null);
+          setLocationOpen(open);
+          if (!open) fromSuggestion.cancel();
         }}
-        editing={editing}
-        existingCourses={rows}
+        prefill={locationPrefill}
+        onCreated={(id) => void fromSuggestion.finish(id).then(() => load())}
         onSaved={() => void load()}
       />
 
@@ -533,6 +603,18 @@ function QualificationUnitPanel() {
   const [loading, setLoading] = React.useState(true);
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<QualificationUnitSequence | null>(null);
+
+  const fromSuggestion = useAddFromSuggestion();
+  const unitPrefill = React.useMemo(
+    () =>
+      fromSuggestion.suggestion?.entity_type === 'UNIT'
+        ? {
+            unitCode: fromSuggestion.suggestion.raw_value,
+            qualificationCode: String(fromSuggestion.suggestion.context?.qualification ?? ''),
+          }
+        : null,
+    [fromSuggestion.suggestion],
+  );
   const [deleting, setDeleting] = React.useState<QualificationUnitSequence | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [recycleOpen, setRecycleOpen] = React.useState(false);
@@ -576,16 +658,11 @@ function QualificationUnitPanel() {
 
   const canMaintain = permissions.maintainReferenceData;
 
-
   /**
-   * Which OD-07 message applies to what the user is currently looking at.
+   * The qualification currently filtered to, when exactly one is selected.
    *
-   * Membership and order are different things: Qualification Data establishes
-   * which units belong to a qualification; an approved rolling timetable
-   * establishes the order they run in. Only the second can be pending, and only
-   * for some qualifications — so a page-wide banner was wrong in both
-   * directions, claiming BSB50420's sequence was unapproved while saying
-   * nothing specific about the ones that genuinely are.
+   * Used by the empty state so it can name the qualification that has no unit
+   * data rather than saying nothing matched.
    */
   const selectedQualification = React.useMemo(() => {
     if (cascade.filters.qualificationIds.length !== 1) return '';
@@ -594,11 +671,8 @@ function QualificationUnitPanel() {
     );
     return option ? option.label.split(' — ')[0] : '';
   }, [cascade.filters.qualificationIds, cascade.qualificationOptions]);
-  const sequenceState: 'unfiltered' | 'approved' | 'pending' = !selectedQualification
-    ? 'unfiltered'
-    : !loading && rows.length === 0
-      ? 'pending'
-      : 'approved';
+
+
 
 
   const columns: DataTableColumn<QualificationUnitSequence>[] = [
@@ -628,23 +702,6 @@ function QualificationUnitPanel() {
         </span>
       ),
     },
-    {
-      id: 'deliveryOrder',
-      header: 'Sequence ID',
-      // Blank where no approved rolling timetable supplies an order. The unit
-      // still belongs to the qualification — membership and teaching order are
-      // different facts, and only the second can be missing (OD-07).
-      cell: (row) =>
-        row.deliveryOrder ?? (
-          <span className="text-muted-foreground" title="No approved delivery sequence yet">
-            &mdash;
-          </span>
-        ),
-      // Unsequenced rows sort last rather than first, so an approved sequence
-      // still reads 1, 2, 3 from the top.
-      sortValue: (row) => row.deliveryOrder ?? Number.MAX_SAFE_INTEGER,
-      align: 'right',
-    },
   ];
 
   async function confirmDelete(reason: ReasonCode, reasonDetail?: string) {
@@ -665,32 +722,17 @@ function QualificationUnitPanel() {
       {!canMaintain && <ReadOnlyNotice message={readOnlyReason(user, INTERFACE_NAMES.qualificationUnitSequence)} />}
 
       {/*
-        OD-07 is shown for the qualification actually being looked at, not
-        across the whole page.
+        No approval banner here. OD-07 is "Break rules" in the register and its
+        own `affects` list names Timetable View and Management, not this tab -
+        it is stated where it actually bites, in the timetable form and the
+        validation checks. TT-11 is cited nowhere in OPEN_DECISIONS at all.
 
-        A blanket banner said "sequence is pending" even for a qualification
-        whose delivery order comes from an approved rolling timetable, and said
-        nothing more specific for one where it genuinely is missing. Both
-        readings were wrong. The notice now names the situation in front of the
-        user; TT-11 break placement remains unapproved either way and is stated
-        separately.
+        What this tab used to warn about - that a delivery sequence exists only
+        where a rolling timetable supplies one - is settled behaviour, not a
+        pending decision, so it is not an approval notice. A qualification with
+        no stored order simply shows its units with no order, which is the
+        honest reading of "the order has not been supplied".
       */}
-      {sequenceState === 'pending' ? (
-        <PendingRuleNotice
-          decisionId="OD-07"
-          message={`No approved delivery sequence has been supplied for ${selectedQualification}. Its unit membership comes from Qualification Data; the teaching order comes from an approved rolling timetable, which this qualification does not yet have. Break placement for 26, 52, 78 and 104-week courses is also still awaiting approval (TT-11).`}
-        />
-      ) : sequenceState === 'approved' ? (
-        <PendingRuleNotice
-          decisionId="TT-11"
-          message={`The delivery sequence shown for ${selectedQualification} comes from its approved rolling timetable. Break placement rules for 26, 52, 78 and 104-week courses are still awaiting approval before automatic generation is released.`}
-        />
-      ) : (
-        <PendingRuleNotice
-          decisionId="OD-07"
-          message="A delivery sequence is stored only for qualifications with an approved rolling timetable; select a qualification to see whether its order has been supplied. Break placement for 26, 52, 78 and 104-week courses is still awaiting approval before automatic generation is released (TT-11)."
-        />
-      )}
 
       <FilterBar
         onClear={() => {
@@ -699,7 +741,18 @@ function QualificationUnitPanel() {
         }}
         trailing={
           <>
-            <SuggestionIndicator entityTypes={['QUALIFICATION', 'UNIT']} onResolved={() => void load()} />
+            <SuggestionIndicator
+              key={fromSuggestion.epoch}
+              // Units only: this tab adds units, and qualifications are added on
+              // College Locations.
+              entityTypes={['UNIT']}
+              onResolved={() => void load()}
+              onAdd={(row) => {
+                fromSuggestion.start(row);
+                setEditing(null);
+                setFormOpen(true);
+              }}
+            />
             <ExportMenu
               rows={rows}
               baseFileName={`tdms-qualification-unit-sequence-${today()}`}
@@ -710,7 +763,6 @@ function QualificationUnitPanel() {
                 { header: 'Qualification Title', value: (row) => row.qualificationTitle },
                 { header: 'Unit Code', value: (row) => row.unitCode },
                 { header: 'Unit Title', value: (row) => row.unitTitle },
-                { header: 'Sequence ID', value: (row) => row.deliveryOrder },
                 { header: 'UoC Type', value: (row) => row.uocType },
               ]}
             />
@@ -735,7 +787,7 @@ function QualificationUnitPanel() {
                   }}
                 >
                   <Plus aria-hidden="true" />
-                  Create Record
+                  Add Unit
                 </Button>
               </>
             )}
@@ -860,10 +912,15 @@ function QualificationUnitPanel() {
         open={formOpen}
         onOpenChange={(open) => {
           setFormOpen(open);
-          if (!open) setEditing(null);
+          if (!open) {
+            setEditing(null);
+            fromSuggestion.cancel();
+          }
         }}
         editing={editing}
         existingRecords={rows}
+        prefill={unitPrefill}
+        onCreated={(id) => void fromSuggestion.finish(id).then(() => load())}
         onSaved={() => void load()}
       />
 
@@ -871,13 +928,13 @@ function QualificationUnitPanel() {
         <DeleteConfirmationDialog
           open
           onOpenChange={(open) => !open && setDeleting(null)}
-          recordTypeLabel="Qualification and Unit Sequence Record"
+          recordTypeLabel="College Qualification Record"
           reasonContext="qualificationUnit"
           busy={busy}
           record={{
             primary: deleting.recordId,
             secondary: `${deleting.qualificationCode} · ${deleting.unitCode}`,
-            lines: [deleting.unitTitle, `Sequence ID: ${deleting.deliveryOrder}`],
+            lines: [deleting.unitTitle],
           }}
           onConfirm={confirmDelete}
         />
@@ -887,7 +944,7 @@ function QualificationUnitPanel() {
         open={recycleOpen}
         onOpenChange={setRecycleOpen}
         title="Deleted qualification and unit sequence records"
-        recordTypeLabel="Qualification and Unit Sequence Record"
+        recordTypeLabel="College Qualification Record"
         reasonContext="qualificationUnit"
         rows={deletedRows}
         loading={recycleLoading}

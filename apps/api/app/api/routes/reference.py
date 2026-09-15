@@ -704,6 +704,7 @@ def _facility_read(facility) -> schemas.FacilityRead:
         source_location=facility.source_location,
         facility_type=facility.facility_type,
         capacity=facility.capacity,
+        room_classification=facility.room_classification,
         is_active=facility.is_active,
         college_short_names=sorted(
             link.college.college_short_name for link in facility.colleges
@@ -713,6 +714,23 @@ def _facility_read(facility) -> schemas.FacilityRead:
             for rule in sorted(facility.faculties, key=lambda r: r.faculty)
         ],
     )
+
+
+@router.post(
+    "/facilities",
+    response_model=schemas.FacilityRead,
+    status_code=status.HTTP_201_CREATED,
+    responses=WRITE_RESPONSES,
+)
+def create_facility(
+    payload: schemas.FacilityCreate,
+    actor: User = Depends(require_maintain_reference_data),
+    session: Session = Depends(get_db),
+):
+    """Add a room, with the colleges and faculty rules that make it usable."""
+    facility = _commit(session, lambda: service.create_facility(session, actor, payload))
+    session.refresh(facility)
+    return _facility_read(facility)
 
 
 @router.get("/facilities", response_model=list[schemas.FacilityRead], responses=READ_RESPONSES)

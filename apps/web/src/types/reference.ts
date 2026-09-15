@@ -95,7 +95,7 @@ export interface QualificationUnitSequence extends SoftDeletable {
   uocType: UocType;
 }
 
-export type UocType = 'Theory' | 'Theory and Practical';
+export type UocType = 'Theory' | 'Practical' | 'Theory and Practical';
 
 /**
  * TT-15 / COL-09 / OD-09: facility data is required for clash and capacity

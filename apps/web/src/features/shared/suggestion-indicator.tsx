@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { AlertTriangle, ChevronDown, Loader2, Search, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Loader2, Plus, Search, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -19,10 +19,10 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/common/states';
 import { usePermissions } from '@/features/auth/auth-context';
-import { referenceApi } from '@/services/reference-api';
 import {
   ENTITY_LABELS,
   suggestionsApi,
+  type MapOptions,
   type AffectedRecords,
   type ReferenceSuggestion,
   type SuggestionEntityType,
@@ -32,59 +32,6 @@ import { cn } from '@/lib/utils';
 
 /** One page of entries inside the dialog. The true total is always stated. */
 const PAGE_SIZE = 10;
-
-/** An approved record the unmatched value can be mapped to. */
-interface PickerOption {
-  id: number;
-  label: string;
-}
-
-/**
- * Approved records of one entity type, for the Map picker.
- *
- * TRAINER is absent deliberately: no approved-trainer list endpoint exists yet,
- * so there is nothing honest to populate a picker with. Mapping a trainer is
- * disabled and says why, rather than reintroducing the numeric id box.
- */
-async function loadOptions(
-  entity: SuggestionEntityType,
-  search: string,
-): Promise<PickerOption[] | null> {
-  const term = search.trim() || undefined;
-  switch (entity) {
-    case 'COLLEGE': {
-      const rows = await referenceApi.listColleges({ search: term, activeOnly: true });
-      return rows.map((row) => ({ id: row.id, label: `${row.college_short_name} — ${row.college_full_name}` }));
-    }
-    case 'CAMPUS': {
-      const rows = await referenceApi.listCampuses({ search: term, activeOnly: true });
-      return rows.map((row) => ({ id: row.id, label: `${row.campus_name} — ${row.campus_location}` }));
-    }
-    case 'QUALIFICATION': {
-      const rows = await referenceApi.listQualifications({ search: term, activeOnly: true });
-      return rows.map((row) => ({
-        id: row.id,
-        label: `${row.qualification_code ?? 'NA'} — ${row.qualification_title}`,
-      }));
-    }
-    case 'UNIT': {
-      const rows = await referenceApi.listUnits({ search: term, activeOnly: true });
-      return rows.map((row) => ({ id: row.id, label: `${row.unit_code} — ${row.unit_title}` }));
-    }
-    case 'FACILITY': {
-      // `listFacilities` filters by college and campus, not by text, so the
-      // search is applied to the returned reference values here.
-      const rows = await referenceApi.listFacilities({});
-      const needle = (term ?? '').toLowerCase();
-      return rows
-        .filter((row) => !needle || row.facility_reference.toLowerCase().includes(needle))
-        .slice(0, 50)
-        .map((row) => ({ id: row.id, label: row.facility_reference }));
-    }
-    default:
-      return null;
-  }
-}
 
 /**
  * The outstanding reference values for one tab.
@@ -101,9 +48,15 @@ async function loadOptions(
 export function SuggestionIndicator({
   entityTypes,
   onResolved,
+  onAdd,
 }: {
   entityTypes: SuggestionEntityType[];
   onResolved?: () => void;
+  /**
+   * Opens the tab's own add form for this entry. A tab that can create the
+   * record passes it; without it the entry offers Map and Reject only.
+   */
+  onAdd?: (row: ReferenceSuggestion) => void;
 }) {
   const permissions = usePermissions();
   const canMaintain = permissions.maintainReferenceData;
@@ -208,6 +161,7 @@ export function SuggestionIndicator({
             void loadSummary();
             onResolved?.();
           }}
+          onAdd={onAdd}
         />
       )}
     </>
@@ -222,6 +176,7 @@ function SuggestionDialog({
   exceptionCount,
   totalCount,
   onChanged,
+  onAdd,
 }: {
   entityTypes: SuggestionEntityType[];
   open: boolean;
@@ -230,6 +185,7 @@ function SuggestionDialog({
   exceptionCount: number;
   totalCount: number;
   onChanged: () => void;
+  onAdd?: (row: ReferenceSuggestion) => void;
 }) {
   // Open on the section that has something in it. Landing on an empty
   // "Suggestions" list while exceptions sit one click away reads as "nothing is
@@ -344,6 +300,15 @@ function SuggestionDialog({
                     void load();
                     onChanged();
                   }}
+                  onAdd={
+                    onAdd
+                      ? (entry) => {
+                          // The form opens over the page, not over this list.
+                          onOpenChange(false);
+                          onAdd(entry);
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </ul>
@@ -394,16 +359,19 @@ function SuggestionRow({
   row,
   canMaintain,
   onChanged,
+  onAdd,
 }: {
   row: ReferenceSuggestion;
   canMaintain: boolean;
   onChanged: () => void;
+  onAdd?: (row: ReferenceSuggestion) => void;
 }) {
   const [busy, setBusy] = React.useState(false);
   const [picking, setPicking] = React.useState(false);
   const [search, setSearch] = React.useState('');
-  const [options, setOptions] = React.useState<PickerOption[] | null>(null);
+  const [options, setOptions] = React.useState<MapOptions | null>(null);
   const [affected, setAffected] = React.useState<AffectedRecords | null>(null);
+
   const [showAffected, setShowAffected] = React.useState(false);
 
   const contextText = Object.entries(row.context ?? {})
@@ -415,24 +383,43 @@ function SuggestionRow({
     if (!picking) return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      void loadOptions(row.entity_type, search)
+      // Scoped on the server by the entry's own context - the qualification a
+      // unit was raised under, the campus a room was named at - because that
+      // context is stored as text and resolving it is matching the API
+      // already does for everything else.
+      void suggestionsApi
+        .mapOptions(row.id, search)
         .then((result) => {
-          if (!cancelled) setOptions(result ?? []);
+          if (!cancelled) setOptions(result);
         })
         .catch(() => {
-          if (!cancelled) setOptions([]);
+          if (!cancelled)
+            setOptions({
+              suggestion_id: row.id,
+              entity_type: row.entity_type,
+              scope_label: null,
+              scope_id: null,
+              scope_only: false,
+              items: [],
+              total: 0,
+              truncated: false,
+            });
         });
     }, 200);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [picking, search, row.entity_type]);
+  }, [picking, search, row.id, row.entity_type]);
 
-  async function act(action: 'CREATE' | 'MAP' | 'REJECT' | 'WITHDRAW', entityId?: number) {
+  async function act(
+    action: 'CREATE' | 'MAP' | 'REJECT' | 'WITHDRAW',
+    entityId?: number,
+    createValues?: Record<string, string>,
+  ) {
     setBusy(true);
     try {
-      const result = await suggestionsApi.resolve(row.id, action, entityId);
+      const result = await suggestionsApi.resolve(row.id, action, entityId, createValues);
       // A resolution that repaired nothing is a warning, never a plain success:
       // it is exactly the condition that hid the original relink fault.
       if (action !== 'WITHDRAW' && result.records_updated === 0) {
@@ -479,8 +466,6 @@ function SuggestionRow({
     }
   }
 
-  const canPick = row.entity_type !== 'TRAINER';
-
   return (
     <li className="rounded-lg border border-border p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -492,7 +477,14 @@ function SuggestionRow({
           onClick={() => void toggleAffected()}
           className="ml-auto inline-flex items-center gap-1 text-[12px] text-muted-foreground underline-offset-2 hover:underline"
         >
-          Affects {row.occurrence_count} record{row.occurrence_count === 1 ? '' : 's'}
+          {/* `occurrence_count` is how many times an import has met this value,
+              not how many records it affects. It was labelled "Affects N
+              records", which promised live impact and delivered a tally - so an
+              entry read "Affects 1 record" while 192 rolling-timetable rows sat
+              behind it, and the expansion said something different again.
+              The tally is named for what it is; the live count is one click
+              away and is the number that decides anything. */}
+          Seen {row.occurrence_count} time{row.occurrence_count === 1 ? '' : 's'} on import
           <ChevronDown aria-hidden="true" className={cn('size-3 transition-transform', showAffected && 'rotate-180')} />
         </button>
       </div>
@@ -512,22 +504,31 @@ function SuggestionRow({
             <>
               <p className="mb-1 text-[12px] font-medium">
                 {affected.total} affected record{affected.total === 1 ? '' : 's'}
-                {affected.truncated && ` — showing the first ${affected.items.length}`}
+                {affected.truncated &&
+                  (affected.items.length > 0
+                    ? ` — showing ${affected.items.length}`
+                    : ' — none can be listed here')}
               </p>
               <ul className="max-h-40 space-y-0.5 overflow-y-auto">
                 {affected.items.map((item, index) => (
                   <li key={index} className="text-[11px] text-muted-foreground">
-                    {[
+                    {/* A membership entry's rows are rolling-timetable weeks,
+                        summarised one line per intake: 192 week rows are eight
+                        intakes teaching the unit, and eight lines say that
+                        where 192 do not. */}
+                    {item.kind === 'rolling_intake'
+                      ? `${item.intake_label} · weeks ${item.first_week}-${item.last_week} (${item.week_rows} row${item.week_rows === 1 ? '' : 's'})`
+                      : [
                       item.qualification_code,
                       item.unit_code,
                       item.campus,
                       item.college,
                       item.classroom,
                       item.trainer,
-                      item.start_date,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
+                          item.start_date,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
                   </li>
                 ))}
               </ul>
@@ -553,22 +554,48 @@ function SuggestionRow({
                   className="h-8 pl-8 text-[13px]"
                 />
               </div>
-              <ul className="max-h-40 space-y-1 overflow-y-auto">
-                {(options ?? []).map((option) => (
+              {options && (
+                <p className="text-[11px] text-muted-foreground">
+                  {options.scope_label
+                    ? options.scope_only
+                      ? `${options.scope_label} only, closest spelling first.`
+                      : `Closest spelling first, then ${options.scope_label.toLowerCase()} (marked ●).`
+                    : 'Closest spelling first.'}
+                </p>
+              )}
+              <ul className="max-h-56 space-y-1 overflow-y-auto">
+                {(options?.items ?? []).map((option) => (
                   <li key={option.id}>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-7 w-full justify-start text-[12px]"
+                      className="h-auto min-h-7 w-full justify-start py-1 text-left text-[12px]"
                       disabled={busy}
                       onClick={() => void act('MAP', option.id)}
                     >
-                      {option.label}
+                      <span className="flex flex-col items-start">
+                        <span>
+                          {option.in_scope && !options?.scope_only && (
+                            <span aria-label="In scope" className="mr-1.5 text-primary">
+                              ●
+                            </span>
+                          )}
+                          {option.label}
+                        </span>
+                        {option.detail && (
+                          <span className="text-[11px] text-muted-foreground">{option.detail}</span>
+                        )}
+                      </span>
                     </Button>
                   </li>
                 ))}
-                {options !== null && options.length === 0 && (
+                {options !== null && options.items.length === 0 && (
                   <li className="text-[12px] text-muted-foreground">No approved record matches.</li>
+                )}
+                {options?.truncated && (
+                  <li className="text-[11px] text-muted-foreground">
+                    Showing {options.items.length} of {options.total}. Type to narrow the list.
+                  </li>
                 )}
               </ul>
               <Button variant="ghost" size="sm" className="h-7 text-[12px]" onClick={() => setPicking(false)}>
@@ -577,24 +604,25 @@ function SuggestionRow({
             </div>
           ) : (
             <>
-              {canPick ? (
-                <Button size="sm" variant="outline" className="h-7 text-[12px]" disabled={busy} onClick={() => setPicking(true)}>
-                  Map to approved record
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-[12px]"
+                disabled={busy}
+                onClick={() => setPicking(true)}
+              >
+                Map to approved record
+              </Button>
+              {onAdd && ADD_LABELS[row.entity_type] && (
+                <Button
+                  size="sm"
+                  className="h-7 text-[12px]"
+                  disabled={busy}
+                  onClick={() => onAdd(row)}
+                >
+                  <Plus aria-hidden="true" className="size-3.5" />
+                  {ADD_LABELS[row.entity_type]}
                 </Button>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex">
-                      <Button size="sm" variant="outline" className="h-7 text-[12px]" disabled>
-                        Map to approved record
-                      </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Trainer records are not yet served by an approved-list endpoint, so there is
-                    nothing to choose from. Reject or withdraw is still available.
-                  </TooltipContent>
-                </Tooltip>
               )}
               <Button
                 size="sm"
@@ -621,6 +649,71 @@ function SuggestionRow({
           )}
         </div>
       )}
+
     </li>
   );
+}
+
+/**
+ * What Add says for each kind of entry, matching the tab's own button.
+ *
+ * COLLEGE has none: a college cannot be created, so its entries are mapped or
+ * rejected.
+ */
+const ADD_LABELS: Partial<Record<SuggestionEntityType, string>> = {
+  CAMPUS: 'Add location',
+  QUALIFICATION: 'Add qualification',
+  UNIT: 'Add unit',
+  FACILITY: 'Add room',
+  TRAINER: 'Add trainer',
+};
+
+/**
+ * Adding a record from a suggestion, for any tab.
+ *
+ * Add opens the tab's own form rather than a second copy of it in the queue, so
+ * there is one form per record type. When the form has created the record, the
+ * entry is resolved onto it - which relinks the rows that raised it and corrects
+ * their spelling, exactly as Map does.
+ *
+ * `finish` reads the entry through a ref so it works whichever order a form
+ * calls it and closes itself in.
+ */
+export function useAddFromSuggestion() {
+  const [suggestion, setSuggestion] = React.useState<ReferenceSuggestion | null>(null);
+  const [epoch, setEpoch] = React.useState(0);
+  const current = React.useRef<ReferenceSuggestion | null>(null);
+
+  React.useEffect(() => {
+    current.current = suggestion;
+  }, [suggestion]);
+
+  const start = React.useCallback((row: ReferenceSuggestion) => {
+    current.current = row;
+    setSuggestion(row);
+  }, []);
+
+  const cancel = React.useCallback(() => setSuggestion(null), []);
+
+  const finish = React.useCallback(async (entityId: number) => {
+    const entry = current.current;
+    current.current = null;
+    setSuggestion(null);
+    if (!entry) return;
+    try {
+      const result = await suggestionsApi.resolve(entry.id, 'CREATE', entityId);
+      toast.success('Suggestion resolved', {
+        description: `${ENTITY_LABELS[entry.entity_type]} “${entry.raw_value}” — ${result.records_updated} record(s) updated.`,
+      });
+    } catch (error) {
+      toast.error('The record was added, but the suggestion could not be resolved', {
+        description: error instanceof Error ? error.message : 'Map it from the queue instead.',
+      });
+    } finally {
+      // Remounts the indicator so its count reflects the resolution.
+      setEpoch((value) => value + 1);
+    }
+  }, []);
+
+  return { suggestion, epoch, start, cancel, finish };
 }

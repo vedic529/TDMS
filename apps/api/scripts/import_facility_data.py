@@ -39,7 +39,11 @@ from app.models.facility import (  # noqa: E402
     FacilityCollege,
     FacilityFaculty,
 )
-from app.services.reference_import import derive_campus, repair_text  # noqa: E402
+from app.services.reference_import import (  # noqa: E402
+    college_short_name,
+    derive_campus,
+    repair_text,
+)
 
 from _source_data import require, source_file  # noqa: E402
 
@@ -83,6 +87,45 @@ def read_rows() -> list[dict]:
 
 def text(value) -> str:
     return repair_text(value)
+
+
+#: Seat count, by every header the workbook has used for it.
+#:
+#: The August revision called it `Capacity`; the September one calls it
+#: `Exact Seats`. Both are read so an older file still imports, and a file with
+#: neither is reported rather than silently treated as having no seats.
+CAPACITY_COLUMNS = ("Exact Seats", "Capacity")
+
+
+def seats(row: dict):
+    """The supplied seat count, or the raw value when it is not usable."""
+    for column in CAPACITY_COLUMNS:
+        if column in row:
+            return row[column]
+    return None
+
+
+def classification_of(row: dict) -> str:
+    """What kind of room this is, beyond a plain classroom.
+
+    Its own column since migration `b5e2c98a4d17`. While none existed the value
+    was carried inside the faculty remark, which attached a property of the
+    *room* to a rule about a faculty and left it unqueryable - timetabling cares
+    whether a room is a computer lab, and it cannot ask a remark.
+    """
+    value = text(row.get("Room Classification"))
+    return "" if value.upper() in NO_REMARK else value
+
+
+def remark_for(row: dict) -> str:
+    """What this row says about the room beyond its recorded fields.
+
+    Only the supplied `Remarks` now. The classification moved to its own column
+    and must not be written here as well: the same fact in two places is the
+    same fact drifting apart.
+    """
+    remark = text(row.get("Remarks"))
+    return "" if remark.upper() in NO_REMARK else remark
 
 
 def yes(value) -> bool:
@@ -150,7 +193,10 @@ def main() -> int:
             print(f"  {count:4}  {name:18} ({how}){'':2}{location[:58]}")
 
         # ---------------------------------------------------------- colleges
-        supplied_colleges = sorted({text(r["College"]) for r in rows})
+        # This file writes `AIBT-I` where Location and Qualification Data write
+        # `AIBTI`. One shared alias table decides the stored form, so the two
+        # imports agree instead of creating a college each.
+        supplied_colleges = sorted({college_short_name(r["College"]) for r in rows})
         missing = [c for c in supplied_colleges if c not in colleges]
         print(f"\ncolleges: {', '.join(supplied_colleges)}")
         for code in missing:
@@ -173,7 +219,7 @@ def main() -> int:
                 problems.append(f"row {row['_row']}: {error}")
                 continue
 
-            capacity = row["Capacity"]
+            capacity = seats(row)
             if not isinstance(capacity, int) or capacity <= 0:
                 problems.append(f"row {row['_row']}: capacity {capacity!r} is not a positive whole number")
                 continue
@@ -186,6 +232,7 @@ def main() -> int:
                     "facility_reference": name,
                     "facility_type": text(row["Classroom Type"]),
                     "capacity": capacity,
+                    "room_classification": classification_of(row) or None,
                     "colleges": set(),
                     "faculties": {},
                 },
@@ -197,12 +244,12 @@ def main() -> int:
                     f"row {row['_row']}: capacity {capacity} disagrees with {entry['capacity']} "
                     f"already supplied for {name!r} at {location}"
                 )
-            college_code = text(row["College"])
+            college_code = college_short_name(row["College"])
             if college_code in colleges:
                 entry["colleges"].add(college_code)
 
             faculty = text(row["Faculty"])
-            remark = text(row["Remarks"])
+            remark = remark_for(row)
             rule = {
                 "availability": availability,
                 "remarks": None if remark.upper() in NO_REMARK else remark,
@@ -237,7 +284,7 @@ def main() -> int:
             (f.campus_id, f.source_location, f.facility_reference): f
             for f in session.execute(select(Facility)).scalars()
         }
-        created = reused = 0
+        created = reused = kept_remarks = 0
         for key, entry in rooms.items():
             facility = existing_facilities.get(key)
             if facility is None:
@@ -247,6 +294,7 @@ def main() -> int:
                     source_location=entry["source_location"],
                     facility_type=entry["facility_type"],
                     capacity=entry["capacity"],
+                    room_classification=entry["room_classification"],
                 )
                 session.add(facility)
                 session.flush()
@@ -254,6 +302,13 @@ def main() -> int:
             else:
                 facility.facility_type = entry["facility_type"]
                 facility.capacity = entry["capacity"]
+                # Set when the file supplies one, kept when it does not - the
+                # same rule the remarks follow. A file with no Room
+                # Classification column says nothing about the rooms, and
+                # clearing 18 classifications because a header is absent would
+                # destroy data the import was never given.
+                if entry["room_classification"] is not None:
+                    facility.room_classification = entry["room_classification"]
                 reused += 1
 
             have_colleges = {link.college_id for link in facility.colleges}
@@ -270,7 +325,17 @@ def main() -> int:
                     session.add(target)
                 for day, value in zip(WEEKDAY_COLUMNS, rule["availability"]):
                     setattr(target, day, value)
-                target.remarks = rule["remarks"]
+                # A remark is replaced when the file supplies one and kept
+                # when it does not. The September revision dropped the
+                # `Remarks` column entirely, and a column the file no longer
+                # carries says nothing about the rooms - erasing 70 stored
+                # remarks holding trainer names and table counts because a
+                # header disappeared would destroy data this import was
+                # never given.
+                if rule["remarks"] is not None:
+                    target.remarks = rule["remarks"]
+                elif target.remarks is not None:
+                    kept_remarks += 1
 
         # Record every supplied Location spelling, so a later import of any
         # file using the same wording resolves without an override.
@@ -282,6 +347,8 @@ def main() -> int:
                 recorded += 1
 
         print(f"\nfacilities created {created}, reused {reused}")
+        if kept_remarks:
+            print(f"faculty remarks kept (file supplies none): {kept_remarks}")
         print(f"campus address spellings recorded: {recorded}")
 
         if args.apply:
