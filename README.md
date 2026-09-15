@@ -15,6 +15,293 @@ without restructuring the project.
 
 ---
 
+## Run locally
+
+How to run TDMS on your own machine from a code editor such as VS Code. There are
+two parts: **Pre Requisite Setup**, which you do once, and **Routine Run
+Commands**, which you use every time.
+
+> **Maintainers:** if a change alters how TDMS is set up or started, update this
+> section in the same commit. That includes a new environment variable,
+> migration, importer or import order, port, service or dependency step. If §6–§8
+> or §14–§16 further down disagree with this section, this section is correct.
+
+Commands run from the **repository root** (the folder containing this README)
+unless a step says `cd` first. Where Windows and macOS/Linux differ, both are
+shown. On Windows, use the PowerShell terminal in your editor.
+
+### Part 1 — Pre Requisite Setup (once per machine)
+
+#### 1. Install the tools
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| Git | any recent | |
+| Node.js | 24 (pinned in `.nvmrc`) | 20 or later works |
+| Python | 3.12 | |
+| Docker Desktop | any recent | Runs the local PostgreSQL 17 database |
+
+#### 2. Clone the repository
+
+```bash
+git clone <repository URL>
+cd <repository folder>
+```
+
+#### 3. Create the environment files
+
+```bash
+cp .env.example .env
+cp apps/web/.env.example apps/web/.env.local
+```
+
+Both files are ignored by Git. **Never commit them.**
+
+Do **not** create `apps/api/.env`. The API reads the repository-root `.env`.
+`apps/api/.env` is read first, so a blank line such as `TDMS_AUTH_MODE=` there
+overrides the root value.
+
+Set these values. Leave every other line as it is in the example.
+
+**Root `.env`**
+
+| Variable | Value |
+| --- | --- |
+| `TDMS_POSTGRES_ADMIN_PASSWORD` | Any local password you choose |
+| `TDMS_POSTGRES_APP_PASSWORD` | A second local password you choose (used in step 6) |
+| `TDMS_AUTH_MODE` | `entra` |
+| `ENTRA_CLIENT_ID` | From the project owner |
+| `ENTRA_ALLOWED_TENANT_IDS` | From the project owner |
+| `ENTRA_API_SCOPE` | From the project owner |
+| `ENTRA_AUTHORIZED_CLIENT_IDS` | Optional. Add this line with the TDMS web app's client ID, from the project owner |
+
+**`apps/web/.env.local`**
+
+| Variable | Value |
+| --- | --- |
+| `NEXT_PUBLIC_TDMS_AUTH_MODE` | `entra` |
+| `NEXT_PUBLIC_ENTRA_CLIENT_ID` | From the project owner |
+| `NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS` | From the project owner |
+| `NEXT_PUBLIC_ENTRA_API_SCOPE` | From the project owner |
+
+TDMS uses real Microsoft sign-in. The Microsoft app registration must list
+`http://localhost:3000/login` as a redirect address; ask the project owner if
+sign-in reports a redirect error. Background:
+[`docs/auth/microsoft-entra-setup.md`](docs/auth/microsoft-entra-setup.md).
+
+#### 4. Install the dependencies
+
+**Windows**
+
+```powershell
+cd apps/api
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+cd ../web
+npm ci
+cd ../..
+```
+
+**macOS / Linux**
+
+```bash
+cd apps/api
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cd ../web
+npm ci
+cd ../..
+```
+
+The commands call the virtual environment's Python directly, so you never need
+to activate it.
+
+#### 5. Start the database and create the schema
+
+Start Docker Desktop and wait until it reports that it is running. Then:
+
+```bash
+docker compose up -d db
+```
+
+**Windows**
+
+```powershell
+cd apps/api
+.venv\Scripts\python -m alembic upgrade head
+cd ../..
+```
+
+**macOS / Linux**
+
+```bash
+cd apps/api
+.venv/bin/python -m alembic upgrade head
+cd ../..
+```
+
+#### 6. Create the application database role
+
+The API connects as the restricted role `tdms_app`. Run this **after** step 5,
+because it grants rights on tables the migrations created. Replace
+`YOUR_APP_PASSWORD` with the `TDMS_POSTGRES_APP_PASSWORD` value from your `.env`.
+
+```bash
+docker compose cp database/roles/create-application-role.sql db:/tmp/create-application-role.sql
+docker compose exec db psql -U postgres -d tdms_dev -v app_password=YOUR_APP_PASSWORD -f /tmp/create-application-role.sql
+```
+
+If you skip this step, leave `TDMS_POSTGRES_APP_PASSWORD` blank. The API then
+falls back to the administrator login. That works, but it loses the protection.
+
+#### 7. Add the source workbooks
+
+The workbooks contain student, staff and college records, so they are **not in
+the repository**, which is public. Get them from the project owner privately.
+Place them in `data/source/` with exactly these names:
+
+| File | Loads |
+| --- | --- |
+| `Location Data.xlsx` | Colleges, campuses, course offerings |
+| `Qualification Data.xlsx` | Qualifications and their units |
+| `Facility Data.xlsx` | Rooms |
+| `Trainer Data - BSB.xlsx` | Trainers and what they can teach |
+| `Rolling TT Data.xlsx` | Rolling timetable sheets (unit sequences) |
+| `Rolling TT Data.csv` | The flat rolling timetable file for BSB |
+
+Everything in `data/source/` except its README is ignored by Git. Never force-add
+these files.
+
+#### 8. Load the reference data
+
+Run the scripts from `apps/api`, **in this order**. Each writes nothing unless
+you pass `--apply`; run a script once without it to preview.
+
+**Windows** (on macOS / Linux replace `.venv\Scripts\python` with
+`.venv/bin/python`)
+
+```powershell
+cd apps/api
+.venv\Scripts\python scripts/import_reference_data.py --apply
+.venv\Scripts\python scripts/populate_reference_aliases.py --apply
+.venv\Scripts\python scripts/set_college_email_domains.py --apply
+.venv\Scripts\python scripts/set_supplied_qualification_units.py --apply
+.venv\Scripts\python scripts/import_facility_data.py --apply
+.venv\Scripts\python scripts/import_trainers.py --apply
+.venv\Scripts\python scripts/import_rolling_timetable.py --package BSB --file "../../data/source/Rolling TT Data.csv" --apply --proceed-matching
+.venv\Scripts\python scripts/import_reference_data.py --apply
+cd ../..
+```
+
+Why the order matters:
+
+- The rolling timetable is refused for a qualification that does not exist yet,
+  so reference data comes first.
+- The reference import runs a second time so it can take unit sequences from
+  the rolling timetable that has now been loaded.
+
+Every script is safe to run again; it does not duplicate rows.
+
+Students and allocation timetables are not loaded here. Load them in the website
+(**Student Data → Bulk Student Import**, and the timetable import). Keep student
+files outside the repository.
+
+#### 9. First sign-in
+
+The first time someone signs in with Microsoft, TDMS creates their account as a
+**Viewer**. The approved elevated addresses in
+[`apps/api/app/db/seeds/manifest.py`](apps/api/app/db/seeds/manifest.py) receive
+their approved role instead. A Super Admin can raise anyone else's role in
+**Administration**.
+
+### Part 2 — Routine Run Commands (every time)
+
+#### Start
+
+1. Start **Docker Desktop** and wait until it reports that it is running.
+2. Start the database from the repository root:
+
+   ```bash
+   docker compose up -d db
+   ```
+
+3. **Terminal 1 — backend**
+
+   Windows:
+
+   ```powershell
+   cd apps/api
+   .venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
+
+   macOS / Linux:
+
+   ```bash
+   cd apps/api
+   .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
+
+4. **Terminal 2 — frontend**
+
+   ```bash
+   cd apps/web
+   npm run dev
+   ```
+
+5. Open <http://localhost:3000> and sign in with Microsoft.
+
+| Service | Address |
+| --- | --- |
+| Website | <http://localhost:3000> |
+| API | <http://127.0.0.1:8000> |
+| API health check | <http://127.0.0.1:8000/health> |
+| API documentation | <http://127.0.0.1:8000/docs> |
+
+The backend runs **without** `--reload`: on Windows, auto-reload has hung after
+edits and kept serving old code. After changing backend code, stop the backend
+with `Ctrl+C` and start it again. The frontend reloads by itself.
+
+#### After pulling new changes
+
+Run whichever apply, from the matching folder:
+
+| What changed | Command |
+| --- | --- |
+| `apps/api/requirements.txt` | `.venv\Scripts\python -m pip install -r requirements.txt` (in `apps/api`) |
+| `apps/web/package-lock.json` | `npm ci` (in `apps/web`) |
+| `apps/api/alembic/versions/` | `.venv\Scripts\python -m alembic upgrade head` (in `apps/api`), then restart the backend |
+| `.env.example` or `apps/web/.env.example` | Copy any new variables into your own `.env` / `.env.local` |
+
+On macOS / Linux use `.venv/bin/python`. `alembic upgrade head` is safe to run
+at any time; it does nothing when the database is already current.
+
+#### Stop
+
+1. Press `Ctrl+C` in both terminals.
+2. Stop the database, keeping its data:
+
+   ```bash
+   docker compose stop db
+   ```
+
+> **Never run `docker compose down -v`** unless you intend to delete the local
+> database. The `-v` removes the data volume, and you would need to repeat
+> Part 1 steps 5–8.
+
+#### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `failed to connect to the docker API` | Docker Desktop is not running. Start it and wait. |
+| `TDMS_POSTGRES_ADMIN_PASSWORD is not set` | Root `.env` is missing. Repeat Part 1 step 3. |
+| Port 3000 or 8000 already in use | Windows: `netstat -ano \| findstr :3000`, then `taskkill /PID <pid> /T /F`. macOS / Linux: `lsof -ti :3000 \| xargs kill` |
+| Sign-in page says sign-in is disabled | The Entra values are missing from `.env` or `apps/web/.env.local`. |
+| Website shows an error loading data | The backend is not running, or the database is stopped. |
+| A backend change does not appear | Restart the backend (no auto-reload). |
+| A script reports a missing workbook | The file in `data/source/` is missing or named differently. See Part 1 step 7. |
+
+---
+
 ## 1. Project overview
 
 TDMS replaces disconnected manual files with controlled pages, clear validation
