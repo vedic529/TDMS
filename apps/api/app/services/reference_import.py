@@ -89,6 +89,78 @@ def _cell(row: dict, key: str) -> str:
     return repair_text(row.get(key))
 
 
+#: Supplied college short names that mean the same college, mapped to the one
+#: form stored.
+#:
+#: The supplied files disagree with each other: Location Data and Qualification
+#: Data write `AIBTI`, Facility Data writes `AIBT-I`. Nothing derives one from
+#: the other — a matcher that strips punctuation would also fold `AIBT-I` into
+#: `AIBT`, which is a different college — so the equivalence is recorded here
+#: rather than inferred. Without it the import creates two colleges from the
+#: same RTO and then cannot resolve the facility rows against either.
+#:
+#: `AIBT-I` is the stored form: it cannot be misread as `AIBT` at a glance in a
+#: dropdown, which `AIBTI` can.
+COLLEGE_SHORT_NAME_ALIASES = {
+    "AIBTI": "AIBT-I",
+}
+
+
+def college_short_name(value: object) -> str:
+    """The stored short name for a supplied college cell."""
+    name = repair_text(value)
+    return COLLEGE_SHORT_NAME_ALIASES.get(name.upper(), name)
+
+
+#: Qualification titles decided by the project owner, where the source cannot
+#: decide for itself.
+#:
+#: `_preferred_title` breaks a tie toward the properly cased form, which settles
+#: the four codes whose variants differ only in "of" versus "Of". It cannot
+#: settle a tie between two genuinely different titles, and picking either by
+#: frequency would be a coin toss dressed as a rule.
+#:
+#: CHC33021 arrives as "(Ageing)" on 45 rows, "(Disability)" on 45, and
+#: "(Ageing and Disability)" on 16. The colleges teach different elective
+#: streams of one national code. All 18 units - both streams on a common core of
+#: 12 - are now stored against it by approved decision (8 September 2026), so the
+#: qualification genuinely covers both and the combined title is the only one of
+#: the three that is true of what is stored.
+APPROVED_QUALIFICATION_TITLES = {
+    "CHC33021": "Certificate III in Individual Support (Ageing and Disability)",
+}
+
+#: Supplied Location strings that no derivation resolves, mapped to the
+#: `campus_code` of the site they name.
+#:
+#: `derive_campus` refuses each of these because no Australian state can be read
+#: from it and `campuses.state` is NOT NULL, so it will not be guessed. Every one
+#: is an existing site written loosely, and the college that supplied the row
+#: settles which site — so these are recorded from evidence rather than matched
+#: on a substring, which would put NPA's `Quay Street` in Bundaberg:
+#:
+#:   '125 Main Street Blacktown'                     AIBT-I  the Blacktown site.
+#:   '18 Mt Gravatt Capalaba Rd, Upper Mt Gravatt'   AIBT-I  the Brisbane site;
+#:       already recorded for BRISBANE in a fuller spelling.
+#:   'Quay Street'                                   NPA     NPA is at Haymarket
+#:       and South Melbourne only, and the Quay Street site is Level 2, 8 Quay
+#:       St Haymarket. The other Quay Street on file, 10 Quay St Bundaberg, is
+#:       AVTA's and is not reachable from an NPA row.
+#:   'South Melbourne'                               NPA     the South Melbourne
+#:       site, which NPA is linked to.
+#:   'Melbourne Campus'                              REACH   REACH is at
+#:       Haymarket, Hobart and Melbourne; only Melbourne fits the name.
+#:
+#: Without these five the import rejects 67 course offerings.
+LOCATION_CAMPUS_OVERRIDES = {
+    "125 Main Street Blacktown": "BLACKTOWN",
+    "18 Mt Gravatt Capalaba Rd, Upper Mt Gravatt": "BRISBANE",
+    "Quay Street": "HAYMARKET",
+    "South Melbourne": "SOUTHMELBOURNE",
+    "Melbourne Campus": "MELBOURNE",
+}
+
+
 #: Values that mean "no VET Code has been issued" (ELICOS).
 _NO_CODE = {"", "NA", "N/A", "N.A.", "NONE", "NIL", "-"}
 
@@ -325,7 +397,7 @@ class ReferenceImporter:
 
     def _import_colleges(self, rows: Sequence[dict]) -> dict[str, College]:
         report = self.report.colleges
-        names = sorted({_cell(r, "RTO") for r in rows} - {""})
+        names = sorted({college_short_name(r.get("RTO")) for r in rows} - {""})
         report.source = len(names)
 
         out: dict[str, College] = {}
@@ -354,6 +426,30 @@ class ReferenceImporter:
         addresses = sorted({_cell(r, "Location") for r in rows} - {""})
         report.source = len(addresses)
 
+        # An address named in LOCATION_CAMPUS_OVERRIDES is an existing site
+        # written too loosely to derive from. It is resolved against the stored
+        # campus and never creates one: the override says which site it is, not
+        # what a new site would look like.
+        out: dict[str, Campus] = {}
+        for address in list(addresses):
+            code = LOCATION_CAMPUS_OVERRIDES.get(address)
+            if code is None:
+                continue
+            campus = self.session.execute(
+                select(Campus).filter_by(campus_code=code)
+            ).scalar_one_or_none()
+            if campus is None:
+                report.rejected.append(
+                    Issue(
+                        LOCATION_FILE, LOCATION_SHEET, "multiple", address,
+                        f"recorded as campus {code!r}, which is not in the database.",
+                    )
+                )
+            else:
+                out[address] = campus
+                report.reuse += 1
+            addresses.remove(address)
+
         # Two addresses deriving the same code are the same site written two
         # ways. They are reported as ambiguous and share one campus rather than
         # being silently split or silently merged without saying so.
@@ -361,7 +457,6 @@ class ReferenceImporter:
         for address in addresses:
             by_code[derive_campus(address).code].append(address)
 
-        out: dict[str, Campus] = {}
         for code, variants in sorted(by_code.items()):
             derived = derive_campus(variants[0])
             if len(variants) > 1:
@@ -408,7 +503,7 @@ class ReferenceImporter:
     def _import_college_campuses(self, rows, colleges, campuses) -> None:
         report = self.report.college_campuses
         pairs = sorted(
-            {(_cell(r, "RTO"), _cell(r, "Location")) for r in rows} - {("", "")}
+            {(college_short_name(r.get("RTO")), _cell(r, "Location")) for r in rows} - {("", "")}
         )
         report.source = len(pairs)
         for rto, address in pairs:
@@ -442,7 +537,7 @@ class ReferenceImporter:
 
         for code, counter in titles.items():
             if len(counter) > 1:
-                chosen = self._preferred_title(counter)
+                chosen = self._preferred_title(counter, code)
                 report.conflicts.append(
                     Issue(
                         QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", code,
@@ -463,7 +558,7 @@ class ReferenceImporter:
             })
         for code in titles:
             attributes.setdefault((code, ""), {
-                "title": self._preferred_title(titles[code]),
+                "title": self._preferred_title(titles[code], code),
                 "course_level": None,
                 "field_of_education_broad": None,
                 "field_of_education_narrow": None,
@@ -475,7 +570,7 @@ class ReferenceImporter:
 
         for key, attrs in sorted(attributes.items(), key=lambda kv: (kv[0][0] or "", kv[0][1])):
             code, name_key = key
-            title = self._preferred_title(titles[code]) if code in titles else attrs["title"]
+            title = self._preferred_title(titles[code], code) if code in titles else attrs["title"]
 
             if code is None:
                 # Code-less ELICOS: identity is the title, so a lookup by code
@@ -520,6 +615,23 @@ class ReferenceImporter:
             if not created:
                 # Fill in anything an earlier, narrower import left empty.
                 changed = False
+                # The title follows the source rather than whatever an earlier,
+                # possibly narrower import happened to write first. Without this
+                # a title corrected at source - or decided in
+                # APPROVED_QUALIFICATION_TITLES - never reaches a qualification
+                # that already exists, which is every qualification after the
+                # first import.
+                if qualification.qualification_title != title:
+                    report.conflicts.append(
+                        Issue(
+                            QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", code,
+                            f"stored title {qualification.qualification_title!r} replaced with "
+                            f"{title!r} from the source.",
+                        )
+                    )
+                    qualification.qualification_title = title
+                    changed = True
+
                 for attribute, value in (
                     ("source_url", urls.get(code) or None),
                     ("course_level", attrs["course_level"]),
@@ -536,13 +648,18 @@ class ReferenceImporter:
         return out
 
     @staticmethod
-    def _preferred_title(counter: Counter) -> str:
+    def _preferred_title(counter: Counter, code: str | None = None) -> str:
         """Pick one title when the source gives several.
 
-        Most frequent wins. A tie is broken toward the properly cased form —
-        "Diploma of Community Services" over "Diploma Of Community Services" —
-        because the difference in those cases is capitalisation, not meaning.
+        An approved title wins outright — the source could not decide and a
+        person did. Otherwise the most frequent wins, and a tie is broken toward
+        the properly cased form, "Diploma of Community Services" over "Diploma
+        Of Community Services", because there the difference is capitalisation
+        rather than meaning.
         """
+        approved = APPROVED_QUALIFICATION_TITLES.get((code or "").upper())
+        if approved:
+            return approved
         best = max(counter.items(), key=lambda kv: (kv[1], -sum(c.isupper() for c in kv[0])))
         return best[0]
 
@@ -592,7 +709,7 @@ class ReferenceImporter:
                 membership[code].add(unit_code)
         for r in qualification_rows:
             code = _cell(r, "Qualification Code").upper()
-            rto = _cell(r, "RTO")
+            rto = college_short_name(r.get("RTO"))
             unit_code = _cell(r, "Unit Code").upper()
             if code and rto and unit_code:
                 per_rto[code].setdefault(rto, set()).add(unit_code)
@@ -602,24 +719,58 @@ class ReferenceImporter:
         for code, by_rto in per_rto.items():
             distinct = {frozenset(v) for v in by_rto.values()}
             if len(distinct) > 1:
+                union = set().union(*by_rto.values())
+                common = set.intersection(*[set(u) for u in by_rto.values()])
                 report.conflicts.append(
                     Issue(
                         QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", code,
                         "RTOs list different unit sets for this national qualification "
                         + "; ".join(f"{rto}={len(u)} units" for rto, u in sorted(by_rto.items()))
-                        + ". The approved schema holds one unit set per qualification, "
-                        "so membership was not written.",
+                        + f". All {len(union)} units were stored ({len(common)} are common to "
+                        "every college); the difference is elective choice, and the schema "
+                        "holds one unit set per qualification. Reported, not hidden.",
                     )
                 )
 
-        conflicted = {
-            issue.identifier for issue in report.conflicts
-        }
-
+        # Colleges disagreeing on a unit set no longer blocks membership.
+        #
+        # It used to: the qualification was skipped entirely, so CHC33021 and
+        # UEE60220 - the only two of 53 where colleges differ - held no units at
+        # all, and the interface showed a qualification that teaches nothing.
+        # Refusing to choose produced the one answer certain to be wrong.
+        #
+        # Approved 8 September 2026: store every unit any college lists, so all
+        # of them share one set. `membership` is already that union, being built
+        # from every row regardless of RTO. Inspecting the two cases shows the
+        # difference is elective streams on a common core - 12 of 18 shared for
+        # CHC33021, 41 of 51 for UEE60220 - not a data error, so the union is
+        # the honest superset rather than a merge of contradictions.
+        #
+        # The disagreement is still reported. It stops being a blocker and stays
+        # a fact worth knowing.
         for code, unit_codes in sorted(membership.items()):
             qualification = qualifications.get((code, ""))
-            if qualification is None or code in conflicted:
+            if qualification is None:
                 continue
+
+            # A unit belongs if Qualification Data lists it *or* it is already
+            # a stored member. Stored membership is not a second guess at the
+            # source - it is a decision of record: a supplied unit set, or a
+            # suggestion someone resolved. Reading only the file would refuse to
+            # order 89 of BSB50120's 99 units, because the file lists ten.
+            #
+            # This does not let the rolling timetable decide membership. It still
+            # orders only what already belongs; it just recognises every way a
+            # unit legitimately came to belong.
+            stored_members = {
+                row[0].upper()
+                for row in self.session.execute(
+                    select(Unit.unit_code)
+                    .join(QualificationUnit, QualificationUnit.unit_id == Unit.id)
+                    .where(QualificationUnit.qualification_id == qualification.id)
+                )
+            }
+            belongs = unit_codes | stored_members
 
             order = self.sequence_sources.get(code)
             if order is None:
@@ -647,18 +798,84 @@ class ReferenceImporter:
                     )
                 continue
 
+            # Membership and order are different facts and are written
+            # separately. Qualification Data decides which units belong;
+            # the rolling timetable decides the order of those it sequences.
+            #
+            # Previously this branch iterated the order alone, so a unit the
+            # file lists but the timetable does not sequence got no membership
+            # row at all - the qualification silently lost units for having a
+            # rolling timetable. Three qualifications lose 16 units between them
+            # that way (FNS50222, FNS60222, BSB50120), and it stayed invisible
+            # while only one qualification had an order.
+            position_of = {}
             for position, unit_code in enumerate(order, start=1):
-                unit = units.get(unit_code)
-                if unit is None:
+                # Membership is decided by Qualification Data, never by the
+                # rolling timetable. The test is "does Qualification Data list
+                # this unit *for this qualification*", not "does this unit exist
+                # somewhere" - the second is what this used to ask, and because
+                # a unit code is globally unique it passed for any real unit.
+                # The rolling timetable then added seven units to BSB50120 that
+                # its own source file does not list.
+                #
+                # A rolling timetable orders what belongs. It does not decide
+                # what belongs.
+                if unit_code in belongs and unit_code in units:
+                    position_of[unit_code] = position
+                elif unit_code in units:
+                    report.rejected.append(
+                        Issue(QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", unit_code,
+                              f"unit is in the {code} delivery order but Qualification Data "
+                              f"does not list it for {code}. Membership comes from the source "
+                              "file, so no order was stored and no membership was created.")
+                    )
+                else:
                     report.rejected.append(
                         Issue(QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", unit_code,
                               f"unit in the {code} delivery order is not in Qualification Data.")
                     )
+
+            # Every unit the file lists gets a row. A unit the order does not
+            # mention keeps `delivery_order` NULL, which reads as "belongs to
+            # this qualification, position not supplied" - true, and different
+            # from being absent.
+            # `belongs`, not `unit_codes`: a stored member must be reached to
+            # have its order filled in. Nothing new is created by widening this -
+            # a stored member already has its row - so membership still comes
+            # only from the file or from a recorded decision.
+            for unit_code in sorted(belongs):
+                unit = units.get(unit_code)
+                if unit is None:
                     continue
-                self._get_or_create(
+                position = position_of.get(unit_code)
+                link, created = self._get_or_create(
                     QualificationUnit, report, {"delivery_order": position},
                     qualification_id=qualification.id, unit_id=unit.id,
                 )
+                if created or position is None:
+                    continue
+
+                # `_get_or_create` reuses an existing row untouched, which is
+                # right for identity but wrong for a fact that arrives later.
+                # A membership row written before its qualification had a
+                # rolling timetable holds NULL, and would hold it forever: the
+                # order became available and nothing filled it in. Eleven of the
+                # thirteen sequenced qualifications were in exactly that state.
+                if link.delivery_order is None:
+                    link.delivery_order = position
+                    report.update += 1
+                elif link.delivery_order != position:
+                    # A stored order disagreeing with the rolling timetable is
+                    # reported, never overwritten. One of them is wrong and this
+                    # import cannot tell which.
+                    report.conflicts.append(
+                        Issue(
+                            QUALIFICATION_FILE, QUALIFICATION_SHEET, "multiple", unit_code,
+                            f"stored delivery order {link.delivery_order} for {code} "
+                            f"disagrees with position {position} in the rolling timetable. "
+                            "The stored value was kept.",
+                        )
+                    )
 
     # -- courses -----------------------------------------------------------
 
@@ -669,7 +886,7 @@ class ReferenceImporter:
         # COL-04 grain: one offering per college + campus + qualification.
         grouped: dict[tuple[str, str, tuple], list[tuple[int, dict]]] = defaultdict(list)
         for index, r in enumerate(rows, start=2):
-            rto, address = _cell(r, "RTO"), _cell(r, "Location")
+            rto, address = college_short_name(r.get("RTO")), _cell(r, "Location")
             key = qualification_key(_cell(r, "VET Code"), _cell(r, "Course Name"))
             if not rto or not address:
                 report.rejected.append(

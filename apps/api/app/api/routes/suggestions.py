@@ -17,6 +17,7 @@ from app.api.deps import get_db, require_maintain_reference_data, require_viewer
 from app.models.user import User
 from app.schemas.allocation import (
     AffectedRecordsRead,
+    MapOptionsRead,
     SuggestionList,
     SuggestionRead,
     SuggestionResolve,
@@ -92,6 +93,23 @@ def read_affected(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/{suggestion_id}/map-options", response_model=MapOptionsRead, responses=READ_RESPONSES)
+def read_map_options(
+    suggestion_id: int,
+    search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """The records this entry could be mapped to, narrowed by what it was raised with."""
+    try:
+        return MapOptionsRead.model_validate(
+            service.map_options(session, suggestion_id, search=search, limit=limit)
+        )
+    except AllocationImportError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/{suggestion_id}/resolve", response_model=SuggestionResolveResult, responses=WRITE_RESPONSES)
 def resolve_suggestion(
     suggestion_id: int,
@@ -107,6 +125,7 @@ def resolve_suggestion(
             suggestion_id=suggestion_id,
             action=payload.action,
             resolved_entity_id=payload.resolved_entity_id,
+            create_values=payload.create_values,
         )
         session.commit()
     except AllocationImportError as exc:

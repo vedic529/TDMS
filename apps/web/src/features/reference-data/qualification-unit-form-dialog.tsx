@@ -26,8 +26,7 @@ import {
   type ApiQualification,
   type ApiUnit,
 } from '@/services/reference-api';
-import { useReferenceLookups } from './use-reference-lookups';
-import { qualificationCodeLabel } from './reference-adapters';
+import { fromUocType, qualificationCodeLabel } from './reference-adapters';
 import { useAuth } from '@/features/auth/auth-context';
 import { nowIso } from '@/lib/format';
 import type { ValidationIssue, ValidationResult } from '@/types/common';
@@ -35,14 +34,10 @@ import type { QualificationUnitSequence, UocType } from '@/types/reference';
 import type { QualificationUnitInput } from '@/services/tdms-client';
 
 const EMPTY: QualificationUnitInput = {
-  recordId: '',
   qualificationCode: '',
   qualificationTitle: '',
   unitCode: '',
   unitTitle: '',
-  deliveryOrder: 1,
-  collegeId: '',
-  campusId: '',
   uocType: 'Theory',
 };
 
@@ -52,17 +47,23 @@ interface QualificationUnitFormDialogProps {
   editing: QualificationUnitSequence | null;
   existingRecords: QualificationUnitSequence[];
   onSaved: () => void;
+  /** From a suggestion: the unit code seen, and the qualification it was under. */
+  prefill?: { unitCode?: string; qualificationCode?: string } | null;
+  /** The unit, so a suggestion can be resolved onto it. */
+  onCreated?: (unitId: number) => void;
 }
 
-/** Create and edit for Qualification and Unit Sequence Data (COL-07). */
+/** Create and edit for College Qualifications, the tab formerly called
+ *  Qualification and Unit Sequence Data (COL-07). */
 export function QualificationUnitFormDialog({
   open,
   onOpenChange,
   editing,
   existingRecords,
   onSaved,
+  prefill,
+  onCreated,
 }: QualificationUnitFormDialogProps) {
-  const { colleges, campusesForCollege, loadCampusesFor } = useReferenceLookups();
   const [qualifications, setQualifications] = React.useState<ApiQualification[]>([]);
   const [units, setUnits] = React.useState<ApiUnit[]>([]);
 
@@ -104,10 +105,15 @@ export function QualificationUnitFormDialog({
    */
   const [qualificationId, setQualificationId] = React.useState('');
 
-  // COL-01: the approved campuses for the chosen college come from the API.
-  React.useEffect(() => {
-    void loadCampusesFor(input.collegeId);
-  }, [input.collegeId, loadCampusesFor]);
+  /** The register entry for the typed code, when there is one. */
+  const knownUnit = React.useMemo(
+    () =>
+      units.find(
+        (row) => row.unit_code.trim().toUpperCase() === input.unitCode.trim().toUpperCase(),
+      ) ?? null,
+    [units, input.unitCode],
+  );
+
   const [step, setStep] = React.useState<'form' | 'preview'>('form');
   const [validation, setValidation] = React.useState<ValidationResult | null>(null);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
@@ -130,10 +136,26 @@ export function QualificationUnitFormDialog({
         ),
       );
     } else {
-      setInput(EMPTY);
-      setQualificationId('');
+      // From a suggestion the unit code and its qualification come with the
+      // entry. A code that already exists brings its title too.
+      const code = prefill?.unitCode?.trim() ?? '';
+      const known = code
+        ? units.find((row) => row.unit_code.trim().toUpperCase() === code.toUpperCase())
+        : undefined;
+      const presetCode = prefill?.qualificationCode?.trim().toUpperCase();
+      const preset = presetCode
+        ? qualifications.find((row) => (row.qualification_code ?? '').toUpperCase() === presetCode)
+        : undefined;
+      setInput({
+        ...EMPTY,
+        unitCode: code,
+        unitTitle: known?.unit_title ?? '',
+        qualificationCode: preset ? qualificationCodeLabel(preset.qualification_code) : '',
+        qualificationTitle: preset?.qualification_title ?? '',
+      });
+      setQualificationId(preset ? String(preset.id) : '');
     }
-  }, [open, editing, qualifications]);
+  }, [open, editing, qualifications, units, prefill]);
 
   function update<K extends keyof QualificationUnitInput>(key: K, value: QualificationUnitInput[K]) {
     setInput((current) => ({ ...current, [key]: value }));
@@ -152,15 +174,15 @@ export function QualificationUnitFormDialog({
     label: `${qualificationCodeLabel(row.qualification_code)} — ${row.qualification_title}`,
   }));
 
+
   function runPreview() {
     const issues: ValidationIssue[] = [];
+    // A complete `qualification_units` row is the qualification and the unit.
+    // Nothing else is asked for, because nothing else is part of the record.
     const required: Array<[string, unknown, string]> = [
-      ['College', input.collegeId, 'Select the college that offers the qualification.'],
-      ['Campus', input.campusId, 'Select an approved campus for the selected college.'],
-      ['Qualification Code', qualificationId, 'Select the approved qualification.'],
-      ['Unit Code', input.unitCode, 'Enter the approved Unit of Competency code.'],
-      ['Unit Title', input.unitTitle, 'Enter the approved Unit of Competency title.'],
-      ['Record ID', input.recordId, 'Enter the system or source reference for this relationship.'],
+      ['Qualification', qualificationId, 'Select the qualification this unit belongs to.'],
+      ['Unit Code', input.unitCode, 'Enter the unit of competency code.'],
+      ['Unit Title', input.unitTitle, 'A unit needs a title.'],
     ];
     for (const [label, value, message] of required) {
       if (!value) {
@@ -174,20 +196,12 @@ export function QualificationUnitFormDialog({
       }
     }
 
-    if (!input.deliveryOrder || input.deliveryOrder < 1) {
-      issues.push({
-        id: 'qus-sequence',
-        severity: 'blocking',
-        title: 'Sequence ID must be 1 or higher',
-        message: 'Enter the approved teaching-order number used when a timetable is generated or checked.',
-        reference: 'Sequence ID',
-      });
-    }
-
+    // Per qualification, matching `uq_qualification_units_qualification_id_unit_id`.
+    // Campus is not part of it: a unit belongs to the qualification everywhere it
+    // is offered.
     const duplicateUnit = existingRecords.find(
       (record) =>
         record.id !== editing?.id &&
-        record.campusId === input.campusId &&
         record.qualificationCode === input.qualificationCode &&
         record.unitCode.trim().toUpperCase() === input.unitCode.trim().toUpperCase(),
     );
@@ -196,25 +210,8 @@ export function QualificationUnitFormDialog({
         id: 'qus-duplicate-unit',
         severity: 'blocking',
         title: 'Unit already exists for this qualification',
-        message: `${duplicateUnit.unitCode} is already recorded for ${duplicateUnit.qualificationCode} at this campus (${duplicateUnit.recordId}).`,
+        message: `${duplicateUnit.unitCode} is already a unit of ${duplicateUnit.qualificationCode}.`,
         reference: 'Unit Code',
-      });
-    }
-
-    const duplicateSequence = existingRecords.find(
-      (record) =>
-        record.id !== editing?.id &&
-        record.campusId === input.campusId &&
-        record.qualificationCode === input.qualificationCode &&
-        record.deliveryOrder === input.deliveryOrder,
-    );
-    if (duplicateSequence) {
-      issues.push({
-        id: 'qus-duplicate-sequence',
-        severity: 'advisory',
-        title: 'Sequence ID is already used',
-        message: `Sequence ${input.deliveryOrder} is already used by ${duplicateSequence.unitCode}. Confirm this is intended before saving.`,
-        reference: 'Sequence ID',
       });
     }
 
@@ -231,7 +228,7 @@ export function QualificationUnitFormDialog({
     setBusy(true);
     try {
       const qualification = qualifications.find((row) => String(row.id) === qualificationId);
-      const unit = units.find((row) => row.unit_code === input.unitCode);
+      const unit = knownUnit;
 
       if (editing) {
         await referenceApi.updateQualificationUnit(Number(editing.id), {
@@ -239,22 +236,45 @@ export function QualificationUnitFormDialog({
           // Omitted rather than sent as null: a membership may legitimately
           // have no approved sequence, and the update contract treats an
           // absent value as "leave it alone".
-          delivery_order: input.deliveryOrder ?? undefined,
+          // The teaching order is never typed in. It comes from an approved
+          // rolling timetable, and once groups arrive each group runs its own
+          // cycle of the same units - so a single number entered by hand could
+          // only ever be right for one of them.
+          delivery_order: undefined,
         });
         toast.success('Record updated', { description: `${input.unitCode} was updated.` });
       } else {
         if (!qualification) throw new Error('Select an approved qualification.');
-        if (!unit) throw new Error('Select an approved unit.');
-        // A new record states a position, so the field is required here even
-        // though an imported membership may have none.
-        if (input.deliveryOrder == null) throw new Error('Enter a Sequence ID.');
+
+        // A unit TDMS does not have is created, not refused. Refusing was the
+        // whole problem: adding a unit means adding one that is not there, and
+        // the form used to insist it already existed.
+        //
+        // An existing code is reused. `units.unit_code` is globally unique, so
+        // a second row is impossible anyway, and a unit that belongs to another
+        // qualification is the ordinary case for this form - it needs the
+        // membership, not another unit.
+        const unitId =
+          unit?.id ??
+          (
+            await referenceApi.createUnit({
+              unit_code: input.unitCode.trim(),
+              unit_title: input.unitTitle.trim(),
+              uoc_type: fromUocType(input.uocType),
+            })
+          ).id;
+
+        // No position is sent. Membership is what this form decides; the
+        // teaching order arrives from an approved rolling timetable.
         await referenceApi.createQualificationUnit({
           qualification_id: qualification.id,
-          unit_id: unit.id,
-          delivery_order: input.deliveryOrder,
+          unit_id: unitId,
         });
-        toast.success('Record added', {
-          description: `${input.unitCode} was added to ${input.qualificationCode} at delivery order ${input.deliveryOrder}.`,
+        onCreated?.(unitId);
+        toast.success(unit ? 'Unit added to the qualification' : 'Unit created and added', {
+          description: unit
+            ? `${input.unitCode} already existed and is now a unit of ${input.qualificationCode}.`
+            : `${input.unitCode} was created and added to ${input.qualificationCode}.`,
         });
       }
       setConfirmOpen(false);
@@ -271,12 +291,10 @@ export function QualificationUnitFormDialog({
 
   const changes = editing
     ? buildChanges(editing as unknown as Record<string, unknown>, input as unknown as Record<string, unknown>, [
-        { key: 'recordId', label: 'Record ID' },
         { key: 'qualificationCode', label: 'Qualification Code' },
         { key: 'qualificationTitle', label: 'Qualification Title' },
         { key: 'unitCode', label: 'Unit Code' },
         { key: 'unitTitle', label: 'Unit Title' },
-        { key: 'deliveryOrder', label: 'Sequence ID' },
         { key: 'uocType', label: 'UoC Type' },
       ])
     : [];
@@ -285,12 +303,10 @@ export function QualificationUnitFormDialog({
     {
       title: 'Qualification and unit sequence',
       items: [
-        { label: 'Record ID', value: input.recordId },
         { label: 'Qualification Code', value: input.qualificationCode },
         { label: 'Qualification Title', value: input.qualificationTitle },
         { label: 'Unit Code', value: input.unitCode },
         { label: 'Unit Title', value: input.unitTitle },
-        { label: 'Sequence ID', value: input.deliveryOrder },
         { label: 'UoC Type', value: input.uocType },
       ],
     },
@@ -302,7 +318,7 @@ export function QualificationUnitFormDialog({
         <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>
-              {editing ? 'Edit Qualification and Unit Sequence Record' : 'Create Qualification and Unit Sequence Record'}
+              {editing ? 'Edit College Qualification Record' : 'Create College Qualification Record'}
             </DialogTitle>
             <DialogDescription>
               {step === 'form'
@@ -315,40 +331,13 @@ export function QualificationUnitFormDialog({
             {step === 'form' ? (
               <>
                 <FormGrid>
-                  <FormField label="College" htmlFor="qus-college" required>
-                    <DependentSelect
-                      id="qus-college"
-                      value={input.collegeId}
-                      onChange={(value) => {
-                        setInput((current) => ({ ...current, collegeId: value, campusId: '', qualificationCode: '' }));
-                        setValidation(null);
-                        setStep('form');
-                      }}
-                      options={colleges.map((college) => ({
-                        value: college.id,
-                        label: college.collegeFullName,
-                      }))}
-                      placeholder="Select college"
-                    />
-                  </FormField>
-                  <FormField label="Campus" htmlFor="qus-campus" required>
-                    <DependentSelect
-                      id="qus-campus"
-                      value={input.campusId}
-                      onChange={(value) => {
-                        setInput((current) => ({ ...current, campusId: value, qualificationCode: '' }));
-                        setValidation(null);
-                        setStep('form');
-                      }}
-                      options={campusesForCollege(input.collegeId).map((campus) => ({
-                        value: campus.id,
-                        label: campus.campusName,
-                      }))}
-                      placeholder="Select campus"
-                      requires={input.collegeId ? undefined : 'a college'}
-                    />
-                  </FormField>
-                  <FormField label="Qualification Code" htmlFor="qus-qualification" required>
+                  {/* Two fields, because a `qualification_units` record is two
+                      columns. College and campus are not asked for: unit
+                      membership belongs to the qualification, so a unit added
+                      here applies everywhere that qualification is offered.
+                      Record ID is not asked for either - there is no such
+                      column, and the list renders it from the row's own key. */}
+                  <FormField label="Qualification" htmlFor="qus-qualification" required>
                     <DependentSelect
                       id="qus-qualification"
                       value={qualificationId}
@@ -365,46 +354,67 @@ export function QualificationUnitFormDialog({
                       }}
                       options={qualificationOptions}
                       placeholder="Select qualification"
-                      requires={input.campusId ? undefined : 'a campus'}
                     />
                   </FormField>
                   <FormField
                     label="Qualification Title"
                     htmlFor="qus-qualification-title"
                     generated
-                    hint="Derived from the selected qualification."
+                    hint="Comes with the qualification."
                   >
                     <Input id="qus-qualification-title" value={input.qualificationTitle} readOnly />
                   </FormField>
-                  <FormField label="Record ID" htmlFor="qus-record-id" required>
-                    <Input
-                      id="qus-record-id"
-                      value={input.recordId}
-                      onChange={(event) => update('recordId', event.target.value)}
-                      placeholder="e.g. QUS-BSB50420-09"
-                    />
-                  </FormField>
-                  <FormField label="Sequence ID" htmlFor="qus-sequence" required>
-                    <Input
-                      id="qus-sequence"
-                      type="number"
-                      min={1}
-                      value={input.deliveryOrder || ''}
-                      onChange={(event) => update('deliveryOrder', Number(event.target.value))}
-                    />
-                  </FormField>
+                  {/* Typed, not chosen.
+                      Adding a unit means adding one TDMS does not have, so a
+                      dropdown of every existing unit answered the wrong
+                      question - and with 675 of them, listing units from
+                      unrelated qualifications, it was unusable besides.
+
+                      A code that already exists is reused, never duplicated:
+                      `units.unit_code` is globally unique, and a unit belonging
+                      to another qualification is exactly the case where this
+                      form links rather than creates. The title fills itself in
+                      then, so the person typing does not have to know which
+                      case they are in. */}
                   <FormField label="Unit Code" htmlFor="qus-unit-code" required>
                     <Input
                       id="qus-unit-code"
                       value={input.unitCode}
-                      onChange={(event) => update('unitCode', event.target.value)}
+                      onChange={(event) => {
+                        const code = event.target.value;
+                        const known = units.find(
+                          (row) => row.unit_code.trim().toUpperCase() === code.trim().toUpperCase(),
+                        );
+                        setInput((current) => ({
+                          ...current,
+                          unitCode: code,
+                          // Only overwrite the title from the register, never a
+                          // title the person is part-way through typing.
+                          unitTitle: known ? known.unit_title : current.unitTitle,
+                          uocType: (known?.uoc_type as UocType) ?? current.uocType,
+                        }));
+                        setValidation(null);
+                        setStep('form');
+                      }}
+                      placeholder="e.g. BSBOPS501"
                     />
                   </FormField>
-                  <FormField label="Unit Title" htmlFor="qus-unit-title" required>
+                  <FormField
+                    label="Unit Title"
+                    htmlFor="qus-unit-title"
+                    required
+                    hint={
+                      knownUnit
+                        ? 'This unit already exists. It will be added to the qualification, not created again.'
+                        : 'A new unit. Enter its title.'
+                    }
+                  >
                     <Input
                       id="qus-unit-title"
                       value={input.unitTitle}
                       onChange={(event) => update('unitTitle', event.target.value)}
+                      readOnly={Boolean(knownUnit)}
+                      placeholder="e.g. Manage business resources"
                     />
                   </FormField>
                   <FormField label="UoC Type" htmlFor="qus-uoc-type">
@@ -414,6 +424,7 @@ export function QualificationUnitFormDialog({
                       onChange={(value) => update('uocType', value as UocType)}
                       options={[
                         { value: 'Theory', label: 'Theory' },
+                        { value: 'Practical', label: 'Practical' },
                         { value: 'Theory and Practical', label: 'Theory and Practical' },
                       ]}
                       placeholder="Select unit type"
@@ -462,7 +473,7 @@ export function QualificationUnitFormDialog({
         <ChangeSummaryDialog
           open={confirmOpen}
           onOpenChange={setConfirmOpen}
-          title="Update Qualification and Unit Sequence Record?"
+          title="Update College Qualification Record?"
           description="Check the record and the fields that will change, then confirm the update."
           record={{
             primary: editing.recordId,
@@ -477,7 +488,7 @@ export function QualificationUnitFormDialog({
         <ConfirmationDialog
           open={confirmOpen}
           onOpenChange={setConfirmOpen}
-          title="Add Qualification and Unit Sequence Record?"
+          title="Add College Qualification Record?"
           description="Please confirm that you want to add this record to the approved reference data."
           confirmLabel="Confirm Add"
           busy={busy}

@@ -14,7 +14,7 @@ import { DataTable, type DataTableColumn } from '@/components/common/data-table'
 import { ActiveBadge } from '@/components/common/status-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { EmptyState, ErrorState } from '@/components/common/states';
-import { SuggestionIndicator } from '@/features/shared/suggestion-indicator';
+import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
 import { TrainerDetailPanel } from './trainer-detail-panel';
 import { TrainerUnitCoverage } from './trainer-unit-coverage';
 import { BulkTrainerImport } from './bulk-trainer-import';
@@ -110,6 +110,15 @@ function TrainerRecordsPanel() {
   const [selected, setSelected] = React.useState<number | null>(null);
   const [panelOpen, setPanelOpen] = React.useState(false);
   const [creating, setCreating] = React.useState(false);
+
+  const fromSuggestion = useAddFromSuggestion();
+  const trainerPrefill = React.useMemo(
+    () =>
+      fromSuggestion.suggestion?.entity_type === 'TRAINER'
+        ? { name: fromSuggestion.suggestion.raw_value }
+        : null,
+    [fromSuggestion.suggestion],
+  );
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -229,12 +238,24 @@ function TrainerRecordsPanel() {
                   aria-label="Search trainers"
                 />
               </div>
-              {/* The trainer suggestions raised by an import, plus the reference
-                  values a trainer file can leave unmatched. Kept from the
-                  previous tab (2.8). */}
+              {/* Trainers only. An entry belongs to the tab that owns the
+                  record you would fix it with, and this is the only tab that
+                  maintains trainers.
+
+                  It previously also asked for CAMPUS, QUALIFICATION and UNIT,
+                  which are not filtered by where they came from — so a campus
+                  the *student* file spelled differently appeared here, on a page
+                  showing nine trainers, claiming to affect 175 records. Those
+                  belong to College and Course Reference Data, which is where a
+                  campus is actually added and edited. */}
               <SuggestionIndicator
-                entityTypes={['TRAINER', 'CAMPUS', 'QUALIFICATION', 'UNIT']}
+                key={fromSuggestion.epoch}
+                entityTypes={['TRAINER']}
                 onResolved={() => void load()}
+                onAdd={(row) => {
+                  fromSuggestion.start(row);
+                  setCreating(true);
+                }}
               />
               <ExportMenu
                 baseFileName="trainers"
@@ -313,7 +334,15 @@ function TrainerRecordsPanel() {
         onChanged={() => void load()}
       />
 
-      <AddTrainerDialog open={creating} onOpenChange={setCreating} onCreated={() => void load()} />
+      <AddTrainerDialog
+        open={creating}
+        onOpenChange={(open) => {
+          setCreating(open);
+          if (!open) fromSuggestion.cancel();
+        }}
+        prefill={trainerPrefill}
+        onCreated={(id) => void fromSuggestion.finish(id).then(() => load())}
+      />
     </>
   );
 }

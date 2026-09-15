@@ -286,6 +286,15 @@ export class MockTdmsClient implements TdmsClient {
   ): Promise<QualificationUnitSequence> {
     const record: QualificationUnitSequence = {
       ...input,
+      // Membership without a position, matching the real path: only an approved
+      // rolling timetable supplies a teaching order.
+      deliveryOrder: null,
+      // Generated, not asked for. The real adapter renders `recordId` from the
+      // row's primary key, and college and campus are display columns reached
+      // through the offering - none of the three is part of the record.
+      recordId: `qus-${input.qualificationCode}-${input.unitCode}`,
+      collegeId: '',
+      campusId: '',
       id: `qus-${input.qualificationCode}-${input.unitCode}-${this.dataset.qualificationUnitSequences.length + 1}`,
       isDeleted: false,
     };

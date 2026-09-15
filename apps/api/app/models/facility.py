@@ -57,6 +57,15 @@ class Facility(Base):
     # Text, not an enum: OD-09 may extend the approved list of facility types.
     facility_type: Mapped[str] = mapped_column(Text, nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: What kind of room it is beyond a plain classroom - `Computer Lab`,
+    #: `Childcare Simulation Room`, and so on.
+    #:
+    #: Nullable because most rooms have none, and a plain classroom is not a
+    #: defect. Text rather than an enum for the same reason `facility_type` is:
+    #: the values are what the supplied file contains today, not an approved
+    #: list, and an enum would turn the next unfamiliar kind of room into an
+    #: import failure.
+    room_classification: Mapped[str | None] = mapped_column(Text, nullable=True)
     # DATA-03: never hard-deleted, so historical timetable rows stay readable.
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 

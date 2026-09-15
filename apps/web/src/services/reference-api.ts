@@ -259,6 +259,7 @@ export interface ApiFacility {
   source_location: string;
   facility_type: string;
   capacity: number;
+  room_classification: string | null;
   is_active: boolean;
   college_short_names: string[];
   faculties: ApiFacilityFaculty[];
@@ -267,6 +268,29 @@ export interface ApiFacility {
 export const referenceApi = {
 
   // ------------------------------------------------------------ facilities
+  createFacility: (body: {
+    facility_reference: string;
+    campus_id: number;
+    facility_type: string;
+    capacity: number;
+    source_location?: string;
+    room_classification?: string | null;
+    college_ids: number[];
+    faculties: Array<{
+      faculty: string;
+      monday: boolean;
+      tuesday: boolean;
+      wednesday: boolean;
+      thursday: boolean;
+      friday: boolean;
+      remarks?: string | null;
+    }>;
+  }) =>
+    request<ApiFacility>('/reference/facilities', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   listFacilities: (params: {
     campusIds?: number[];
     collegeIds?: number[];
@@ -412,7 +436,7 @@ export const referenceApi = {
   createQualificationUnit: (body: {
     qualification_id: number;
     unit_id: number;
-    delivery_order: number;
+    delivery_order?: number;
   }) =>
     request<ApiQualificationUnit>('/reference/qualification-units', {
       method: 'POST',

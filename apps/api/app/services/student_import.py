@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import delete, func, insert, or_, select, tuple_
 from sqlalchemy.orm import Session
 
-from app.models.college import Campus, College, CollegeCampus
+from app.models.college import Campus, CampusSourceAddress, College, CollegeCampus
 from app.models.course import CourseOffering, OfferingDurationOption
 from app.models.import_batch import ImportBatch, ImportRowIssue, ImportStagedRow
 from app.models.qualification import Qualification
@@ -234,6 +234,16 @@ def _load_lookups(session: Session) -> Lookups:
         campus_by_name[cam.campus_name.strip().upper()] = cam.id
         if cam.campus_location:
             campus_by_name.setdefault(cam.campus_location.strip().upper(), cam.id)
+    # Every recorded spelling of a campus, not just its name and current
+    # address. `campus_source_addresses` is where the project already keeps the
+    # forms a site is written in — the facility import has read it since it was
+    # built — and reading it here is what stops a student file spelling like
+    # `Quay Street` raising a suggestion for a campus TDMS already knows.
+    #
+    # `setdefault`, so a recorded spelling never displaces a campus's own name.
+    for alias in session.execute(select(CampusSourceAddress)).scalars():
+        if alias.source_address:
+            campus_by_name.setdefault(alias.source_address.strip().upper(), alias.campus_id)
     qual_by_key: dict[str, tuple[int, str]] = {}
     qual_code_by_id: dict[int, str] = {}
     for q in session.execute(select(Qualification)).scalars():

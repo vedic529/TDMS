@@ -170,6 +170,12 @@ class SuggestionResolve(BaseModel):
     #: CREATE, MAP, REJECT or WITHDRAW.
     action: str
     resolved_entity_id: int | None = None
+    #: Fields for a record CREATE has to bring into existence, when nothing
+    #: stored supplies them. A unit named only by a rolling timetable has no
+    #: title anywhere in TDMS - the timetable carries the code twice and no
+    #: name - so the title is asked for rather than invented. Where the record
+    #: does already exist, CREATE finds it and this stays empty.
+    create_values: dict[str, str] | None = None
 
 
 class SuggestionResolveResult(BaseModel):
@@ -187,6 +193,34 @@ class SuggestionSummaryRead(BaseModel):
     entity_type: str
     pending: int
     exceptions: int
+
+
+class MapOptionRead(BaseModel):
+    """One record an entry could be mapped to."""
+
+    id: int
+    label: str
+    #: Anything that tells two similar records apart - for a room, the building.
+    detail: str | None = None
+    #: Inside the scope the entry was raised with: the qualification's units,
+    #: the campus's rooms, the college's locations.
+    in_scope: bool = False
+
+
+class MapOptionsRead(BaseModel):
+    suggestion_id: int
+    entity_type: str
+    #: The scope in words, or `None` when the entry carries no context.
+    scope_label: str | None = None
+    #: The record the scope resolved to - the college, qualification or campus.
+    #: A room entry names its campus by an address spelling only the server can
+    #: resolve, so a form pre-filled from the entry takes the campus from here.
+    scope_id: int | None = None
+    #: The list holds the scope and nothing else - rooms at one campus.
+    scope_only: bool = False
+    items: list[MapOptionRead] = []
+    total: int = 0
+    truncated: bool = False
 
 
 class AffectedRecordsRead(BaseModel):

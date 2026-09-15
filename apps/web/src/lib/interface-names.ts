@@ -18,9 +18,12 @@ export const INTERFACE_NAMES = {
   trainerUnitCoverage: 'Unit Coverage',
   bulkTrainerImport: 'Bulk Import',
   referenceData: 'College and Course Reference Data',
-  courseData: 'Course Data',
-  qualificationUnitSequence: 'Qualification and Unit Sequence Data',
-  facilityData: 'Facility Data',
+  // Renamed 9 September 2026. The keys keep their original names so the SRS
+  // page references below still line up: `courseData` is Page 4A whatever it is
+  // called on screen.
+  courseData: 'College Locations',
+  qualificationUnitSequence: 'College Qualifications',
+  facilityData: 'College Facility',
   administration: 'Administration',
   userActivityRecords: 'User Activity Records',
 } as const;
@@ -28,6 +31,11 @@ export const INTERFACE_NAMES = {
 /**
  * SRS page references used inside stored user activity records so an
  * administrator can trace an action back to the requirement.
+ *
+ * These keep the SRS wording even after the on-screen names changed. They are
+ * written into stored activity records, and thousands of existing rows already
+ * carry these exact strings - rewording them here would split one page's history
+ * across two labels and break the trace back to the approved requirement.
  */
 export const SRS_PAGE_REFERENCE = {
   timetable: 'Page 1 - Timetable View and Management',

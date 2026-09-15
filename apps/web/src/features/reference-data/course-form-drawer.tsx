@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { INTERFACE_NAMES } from '@/lib/interface-names';
 import { Eye, Loader2, Save } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -64,7 +65,7 @@ interface CourseFormDrawerProps {
   onSaved: () => void;
 }
 
-/** Create and edit for Course Data (COL-07). */
+/** Create and edit for College Locations, the tab formerly called Course Data (COL-07). */
 export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses, onSaved }: CourseFormDrawerProps) {
   const { colleges, campusesForCollege, campusById, collegeById, loadCampusesFor } =
     useReferenceLookups();
@@ -228,7 +229,7 @@ export function CourseFormDrawer({ open, onOpenChange, editing, existingCourses,
           total_course_cost: input.totalCourseCost || null,
           duration_options: input.durationInWeeks ? [input.durationInWeeks] : [],
         });
-        toast.success('Course added', { description: `${input.courseCode} was added to Course Data.` });
+        toast.success('Course added', { description: `${input.courseCode} was added to ${INTERFACE_NAMES.courseData}.` });
       }
       setConfirmOpen(false);
       onOpenChange(false);

@@ -172,16 +172,26 @@ def test_r5_all_spellings_relink(session, refs):
     assert updated == 6, "every spelling must relink, not only the stored one"
 
 
-def test_r6_text_is_retained_after_a_successful_map(session, refs):
-    """R6 — the text records what the file said and survives the resolution."""
+def test_r6_mapping_corrects_the_stored_spelling(session, refs):
+    """R6 — mapping writes the identifier and corrects the text to the record's name.
+
+    Amended 14 September 2026. This used to assert the misspelled text survived
+    the resolution, as a record of what the file said. The approved rule is now
+    that a mapped misspelling is corrected everywhere it is stored: left in place
+    it still matched nothing, so on a table with no identifier - the rolling
+    timetable - the entry never closed and was answered again on every import.
+    """
     _apply(session, [base_row(refs, **{"Campus Location": "Keep My Text"})], refs)
     entry = _entry(session, "CAMPUS")
     suggestions.resolve_suggestion(
         session, _editor(session), suggestion_id=entry.id, action="MAP", resolved_entity_id=refs["campus_id"]
     )
     delivery = session.execute(select(AllocationDelivery)).scalars().first()
+    campus_name = session.execute(
+        text("SELECT campus_name FROM campuses WHERE id = :id"), {"id": refs["campus_id"]}
+    ).scalar_one()
     assert delivery.campus_id == refs["campus_id"]
-    assert delivery.campus_text == "Keep My Text"
+    assert delivery.campus_text == campus_name
 
 
 def test_r7_resolving_nothing_reports_zero(session, refs):
@@ -196,8 +206,13 @@ def test_r7_resolving_nothing_reports_zero(session, refs):
     assert updated == 0
 
 
-def test_r8_relink_is_one_statement(session, refs, test_engine):
-    """R8 — 30 rows relink in ONE update, never one per row."""
+def test_r8_relink_is_set_based(session, refs, test_engine):
+    """R8 — 30 rows are repaired in a fixed number of updates, never one per row.
+
+    Amended 14 September 2026: two statements rather than one. One writes the
+    identifier and one corrects the spelling. What this protects is unchanged -
+    neither statement scales with the number of rows.
+    """
     rows = [
         base_row(refs, **{"Campus Location": "Bulk Campus", "Units of Competency ID": f"B{n}"})
         for n in range(30)
@@ -220,22 +235,44 @@ def test_r8_relink_is_one_statement(session, refs, test_engine):
         event.remove(test_engine, "before_cursor_execute", _before)
 
     assert updated == 30
-    assert len(statements) == 1, f"expected one UPDATE, issued {len(statements)}"
+    assert len(statements) == 2, f"expected two set-based UPDATEs, issued {len(statements)}"
 
 
-def test_r9_an_already_resolved_row_is_untouched(session, refs):
-    """R9 — the IS NULL guard: a resolved row that retains text is not rewritten."""
+def test_r9_a_row_resolved_to_another_record_is_untouched(session, refs):
+    """R9 — a row already resolved to a different record keeps its link and its text.
+
+    Amended 14 September 2026. The previous version resolved the row to the *same*
+    campus it then mapped to, and asserted nothing changed. Mapping now corrects
+    the spelling on a row linked to the same record, so that scenario no longer
+    tests a guard. The guard that matters is this one: a row linked to a
+    different record is not this entry's, so neither its identifier nor its text
+    may change, even though it carries the same misspelling.
+    """
     _apply(session, [base_row(refs, **{"Campus Location": "Once Unresolved"})], refs)
     entry = _entry(session, "CAMPUS")
-    # Simulate a row resolved earlier that still carries its original text.
+
+    other = session.execute(text("SELECT id FROM campuses WHERE campus_code = 'RELINK_OTHER'")).scalar()
+    if other is None:
+        other = session.execute(
+            text(
+                "INSERT INTO campuses (campus_code, campus_name, campus_location, state) "
+                "VALUES ('RELINK_OTHER', 'Relink Other', '1 Other St, Sydney NSW 2000', 'NSW') "
+                "RETURNING id"
+            )
+        ).scalar_one()
+    # A row resolved earlier to another campus that still carries the same text.
     session.execute(
         text("UPDATE allocation_delivery SET campus_id = :other, campus_text = 'Once Unresolved'"),
-        {"other": refs["campus_id"]},
+        {"other": other},
     )
+
     _row, updated = suggestions.resolve_suggestion(
         session, _editor(session), suggestion_id=entry.id, action="MAP", resolved_entity_id=refs["campus_id"]
     )
-    assert updated == 0, "a resolved row must not be relinked again"
+    delivery = session.execute(select(AllocationDelivery)).scalars().first()
+    assert updated == 0, "a row resolved to another record must be neither relinked nor rewritten"
+    assert delivery.campus_id == other
+    assert delivery.campus_text == "Once Unresolved"
 
 
 # ---------------------------------------------------------------------------

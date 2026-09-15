@@ -248,11 +248,27 @@ class UnitRead(BaseModel):
     is_active: bool
 
 
+#: The values `uoc_type` accepts. The column is a Postgres enum, so anything
+#: else fails at the insert rather than at the contract - which is how a form
+#: sending the display spelling `Theory` reached the database and produced a
+#: driver error instead of a readable refusal.
+UOC_TYPE_VALUES = ("THEORY", "THEORY_AND_PRACTICAL", "PRACTICAL")
+
+
+def _validate_uoc_type(value: str | None) -> str | None:
+    if value is None or value in UOC_TYPE_VALUES:
+        return value
+    allowed = ", ".join(UOC_TYPE_VALUES)
+    raise ValueError(f"uoc_type must be one of {allowed}.")
+
+
 class UnitCreate(BaseModel):
     unit_code: str = Field(..., min_length=1, max_length=50)
     unit_title: str = Field(..., min_length=1, max_length=300)
     uoc_type: str | None = None
     is_active: bool = True
+
+    _check_uoc_type = field_validator("uoc_type")(classmethod(lambda cls, v: _validate_uoc_type(v)))
 
     @field_validator("unit_code")
     @classmethod
@@ -320,7 +336,19 @@ class QualificationUnitRead(BaseModel):
 class QualificationUnitCreate(BaseModel):
     qualification_id: int
     unit_id: int
-    delivery_order: int = Field(..., ge=1, le=999)
+    #: Optional, and normally absent.
+    #:
+    #: Adding a unit to a qualification is a *membership* decision; the teaching
+    #: order comes from an approved rolling timetable and is written by the
+    #: reference import. It used to be required here, which forced whoever added
+    #: a unit by hand to invent a position - and an invented order is
+    #: indistinguishable from an approved one in the column that TT-08 reads.
+    #:
+    #: It also could not stay right. A rolling timetable runs the same units as a
+    #: repeating cycle that each intake joins at a different point, and once
+    #: groups arrive each group runs its own cycle - so a single number per
+    #: qualification can only ever describe one of them.
+    delivery_order: int | None = Field(default=None, ge=1, le=999)
 
 
 class QualificationUnitUpdate(BaseModel):
@@ -471,6 +499,47 @@ class FacilityFacultyRead(BaseModel):
     remarks: str | None = None
 
 
+class FacilityFacultyInput(BaseModel):
+    """One faculty's permission to use a room, and the days it may."""
+
+    faculty: str = Field(..., min_length=1, max_length=100)
+    monday: bool = False
+    tuesday: bool = False
+    wednesday: bool = False
+    thursday: bool = False
+    friday: bool = False
+    remarks: str | None = Field(default=None, max_length=500)
+
+
+class FacilityCreate(BaseModel):
+    """A complete room: the row, who may use it, and when.
+
+    A facility is not one table. `facilities` holds the room, `facility_colleges`
+    holds which colleges may use it and `facility_faculties` holds which faculty
+    may, on which weekdays. A room written without those links exists but is
+    usable by nobody, which is why they are part of this contract rather than
+    separate calls that could each half-succeed.
+
+    `colleges` and `faculties` require at least one entry for that reason. The
+    supplied file has never produced a room with neither.
+    """
+
+    facility_reference: str = Field(..., min_length=1, max_length=200)
+    campus_id: int
+    facility_type: str = Field(..., min_length=1, max_length=100)
+    capacity: int = Field(..., ge=1, le=1000)
+    #: Which building on the campus. Two buildings can share a campus, so this is
+    #: what separates `Room 4` in one from `Room 4` in the other. Defaults to the
+    #: campus address when a person does not distinguish them.
+    source_location: str = Field(default="", max_length=300)
+    #: `Computer Lab`, `Childcare Simulation Room`, and so on. Most rooms have
+    #: none, and a plain classroom is not a defect.
+    room_classification: str | None = Field(default=None, max_length=200)
+    is_active: bool = True
+    college_ids: list[int] = Field(..., min_length=1)
+    faculties: list[FacilityFacultyInput] = Field(..., min_length=1)
+
+
 class FacilityRead(BaseModel):
     """A room, with the colleges and faculties allowed to use it.
 
@@ -491,6 +560,8 @@ class FacilityRead(BaseModel):
     source_location: str
     facility_type: str
     capacity: int
+    #: `None` for a plain classroom, which is most of them.
+    room_classification: str | None = None
     is_active: bool
     college_short_names: list[str] = Field(default_factory=list)
     faculties: list[FacilityFacultyRead] = Field(default_factory=list)

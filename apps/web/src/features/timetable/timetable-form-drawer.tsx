@@ -311,7 +311,12 @@ export function TimetableFormDrawer({
 
     const weeksPerUnit = Math.max(1, Math.round((input.durationInWeeks || 52) / Math.max(1, unitSequence.length)));
     const endDate = addDays(input.uocStartDate, weeksPerUnit * 7 - 3);
-    const requiresPractical = nextUnit.uocType === 'Theory and Practical';
+    // A practical-only unit needs a practical room just as much as a combined
+    // one does. Testing only for `Theory and Practical` gave it none, and then
+    // filled in theory days it does not teach.
+    const requiresPractical =
+      nextUnit.uocType === 'Theory and Practical' || nextUnit.uocType === 'Practical';
+    const requiresTheory = nextUnit.uocType !== 'Practical';
 
     setInput((current) => ({
       ...current,
@@ -319,15 +324,20 @@ export function TimetableFormDrawer({
       uocTitle: nextUnit.unitTitle,
       uocType: nextUnit.uocType,
       uocEndDate: endDate,
-      theoryDaysAndTimes: [
-        { day: 'Monday', startTime: '09:00', endTime: '13:00' },
-        { day: 'Tuesday', startTime: '09:00', endTime: '13:00' },
-      ],
+      theoryDaysAndTimes: requiresTheory
+        ? [
+            { day: 'Monday', startTime: '09:00', endTime: '13:00' },
+            { day: 'Tuesday', startTime: '09:00', endTime: '13:00' },
+          ]
+        : [],
       practicalDaysAndTimes: requiresPractical ? [{ day: 'Thursday', startTime: '08:00', endTime: '14:00' }] : [],
-      theoryClassroomName: current.theoryClassroomName || (classroomOptions[0]?.value ?? ''),
-      theoryClassroomCapacity:
-        current.theoryClassroomCapacity ||
-        (facilities.find((f) => f.facilityReference === classroomOptions[0]?.value)?.capacity ?? 0),
+      theoryClassroomName: requiresTheory
+        ? current.theoryClassroomName || (classroomOptions[0]?.value ?? '')
+        : '',
+      theoryClassroomCapacity: requiresTheory
+        ? current.theoryClassroomCapacity ||
+          (facilities.find((f) => f.facilityReference === classroomOptions[0]?.value)?.capacity ?? 0)
+        : 0,
       practicalClassroomName: requiresPractical
         ? current.practicalClassroomName || (practicalOptions[0]?.value ?? '')
         : '',
@@ -335,7 +345,7 @@ export function TimetableFormDrawer({
         ? current.practicalClassroomCapacity ||
           (facilities.find((f) => f.facilityReference === practicalOptions[0]?.value)?.capacity ?? 0)
         : 0,
-      theoryTrainerId: current.theoryTrainerId || (trainerOptions[0]?.value ?? ''),
+      theoryTrainerId: requiresTheory ? current.theoryTrainerId || (trainerOptions[0]?.value ?? '') : '',
     }));
     setGenerated(true);
     setValidation(null);

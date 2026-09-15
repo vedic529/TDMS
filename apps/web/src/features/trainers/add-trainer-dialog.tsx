@@ -91,10 +91,14 @@ export function AddTrainerDialog({
   open,
   onOpenChange,
   onCreated,
+  prefill,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
+  /** The new trainer, so a suggestion can be resolved onto it. */
+  onCreated: (trainerId: number) => void;
+  /** From a suggestion: the trainer name as it was seen. */
+  prefill?: { name?: string } | null;
 }) {
   const [name, setName] = React.useState('');
   const [city, setCity] = React.useState('');
@@ -108,11 +112,11 @@ export function AddTrainerDialog({
 
   React.useEffect(() => {
     if (!open) return;
-    setName('');
+    setName(prefill?.name ?? '');
     setCity('');
     setLocations([]);
     setUnits([]);
-  }, [open]);
+  }, [open, prefill]);
 
   // Debounced: the id follows the name without a request per keystroke.
   React.useEffect(() => {
@@ -150,8 +154,8 @@ export function AddTrainerDialog({
             ? `${detail.locations.length} location(s) and ${detail.qualifications.length} qualification(s) recorded.`
             : 'Add their locations and units from the side panel whenever you are ready.',
       });
+      onCreated(detail.id);
       onOpenChange(false);
-      onCreated();
     } catch (caught) {
       toast.error('The trainer could not be created', {
         description: caught instanceof Error ? caught.message : 'Try again.',

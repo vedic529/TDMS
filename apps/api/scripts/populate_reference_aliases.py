@@ -26,7 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings  # noqa: E402
 from app.models.college import Campus, CampusSourceAddress  # noqa: E402
 from app.models.qualification import Qualification, QualificationSupersession  # noqa: E402
-from app.services.reference_import import derive_campus, repair_text  # noqa: E402
+from app.services.reference_import import (  # noqa: E402
+    LOCATION_CAMPUS_OVERRIDES,
+    derive_campus,
+    repair_text,
+)
 
 from _source_data import LOCATION_FILE, require  # noqa: E402
 
@@ -56,8 +60,13 @@ def source_addresses() -> dict[str, set[str]]:
         if not row or index >= len(row):
             continue
         address = repair_text(row[index])
-        if address:
-            grouped[derive_campus(address).code].add(address)
+        if not address:
+            continue
+        # An address too loose to derive from is not skipped: the override says
+        # which campus it names, and recording it here is what lets a student or
+        # timetable row arriving in that spelling resolve later.
+        code = LOCATION_CAMPUS_OVERRIDES.get(address) or derive_campus(address).code
+        grouped[code].add(address)
     return grouped
 
 

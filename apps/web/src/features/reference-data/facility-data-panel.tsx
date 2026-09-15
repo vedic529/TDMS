@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { Plus } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -8,13 +9,17 @@ import { FilterBar, FilterField } from '@/components/common/filter-bar';
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
 import { EmptyState, ErrorState } from '@/components/common/states';
-import { SuggestionIndicator } from '@/features/shared/suggestion-indicator';
+import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
+import { suggestionsApi } from '@/services/suggestions-api';
 import { ExportMenu } from '@/components/common/export-menu';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useCascadingFilters } from './use-cascading-filters';
 import { toFacilityRecord } from './reference-adapters';
 import { ReferenceApiError, referenceApi } from '@/services/reference-api';
 import { INTERFACE_NAMES, SRS_PAGE_REFERENCE } from '@/lib/interface-names';
+import { Button } from '@/components/ui/button';
+import { useAuth } from '@/features/auth/auth-context';
+import { FacilityFormDialog } from './facility-form-dialog';
 import { today } from '@/lib/format';
 import type { FacilityRecord } from '@/types/reference';
 
@@ -68,6 +73,21 @@ function matchesSearch(row: FacilityRecord, query: string): boolean {
 export function FacilityDataPanel() {
   const cascade = useCascadingFilters();
 
+  const { permissions } = useAuth();
+  const canMaintain = permissions.maintainReferenceData;
+  const [adding, setAdding] = React.useState(false);
+
+  // A room entry names its campus by an address spelling, which only the
+  // server can resolve - so the campus comes from the entry's map options.
+  const fromSuggestion = useAddFromSuggestion();
+  const [suggestedCampusId, setSuggestedCampusId] = React.useState<number | undefined>(undefined);
+  const roomPrefill = React.useMemo(
+    () =>
+      fromSuggestion.suggestion?.entity_type === 'FACILITY'
+        ? { reference: fromSuggestion.suggestion.raw_value, campusId: suggestedCampusId }
+        : null,
+    [fromSuggestion.suggestion, suggestedCampusId],
+  );
   const [search, setSearch] = React.useState('');
   const [faculty, setFaculty] = React.useState('');
   const [rows, setRows] = React.useState<FacilityRecord[]>([]);
@@ -90,7 +110,7 @@ export function FacilityDataPanel() {
       setError(
         caught instanceof ReferenceApiError
           ? caught.message
-          : 'Facility Data could not be loaded. Try again, or contact the TDMS administrator.',
+          : `${INTERFACE_NAMES.facilityData} could not be loaded. Try again, or contact the TDMS administrator.`,
       );
     } finally {
       setLoading(false);
@@ -226,7 +246,27 @@ export function FacilityDataPanel() {
         }}
         trailing={
           <>
-          <SuggestionIndicator entityTypes={['FACILITY']} />
+          <SuggestionIndicator
+            key={fromSuggestion.epoch}
+            entityTypes={['FACILITY']}
+            onResolved={() => void load()}
+            onAdd={(row) => {
+              fromSuggestion.start(row);
+              void suggestionsApi
+                .mapOptions(row.id, '', 1)
+                .then(
+                  (result) => setSuggestedCampusId(result.scope_id ?? undefined),
+                  () => setSuggestedCampusId(undefined),
+                )
+                .finally(() => setAdding(true));
+            }}
+          />
+          {canMaintain && (
+            <Button onClick={() => setAdding(true)}>
+              <Plus aria-hidden="true" />
+              Add room
+            </Button>
+          )}
           <ExportMenu
             rows={visible}
             baseFileName={`tdms-facility-data-${today()}`}
@@ -292,13 +332,13 @@ export function FacilityDataPanel() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Classroom, location or remark"
-            aria-label="Search Facility Data"
+            aria-label={`Search ${INTERFACE_NAMES.facilityData}`}
           />
         </FilterField>
       </FilterBar>
 
       {error ? (
-        <ErrorState title="Facility Data could not be loaded" description={error} />
+        <ErrorState title={`${INTERFACE_NAMES.facilityData} could not be loaded`} description={error} />
       ) : (
         <DataTable
           rows={visible}
@@ -315,6 +355,17 @@ export function FacilityDataPanel() {
           }
         />
       )}
+
+      <FacilityFormDialog
+        open={adding}
+        onOpenChange={(open) => {
+          setAdding(open);
+          if (!open) fromSuggestion.cancel();
+        }}
+        prefill={roomPrefill}
+        onCreated={(id) => void fromSuggestion.finish(id).then(() => load())}
+        onSaved={() => void load()}
+      />
     </div>
   );
 }
