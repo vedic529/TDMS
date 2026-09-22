@@ -95,6 +95,7 @@ column here. The relationship lives in `college_campuses`.
 | --- | --- | --- | --- | --- | --- | --- |
 | `college_id` | `bigint` | N | PK, FK | | COL-01 | C |
 | `campus_id` | `bigint` | N | PK, FK | | COL-01 | C |
+| `address` | `text` | Y | | The full address of this college at this campus — the **Campus Address Dictionary** (approved 16 Sep 2026). College + campus identifies the address: one campus name can be a different building per college (Haymarket: 8 Quay St for REACH/NPA, 841 George St for AIBT/BIC). Null for a combination with no recorded address; never guessed. Maintained in College Locations → Address Dictionary; seeded by `scripts/apply_campus_address_dictionary.py` | owner's address sheet | C |
 | `is_active` | `boolean` | N | | Retire a combination without deleting it | DATA-03 | C |
 
 `PRIMARY KEY (college_id, campus_id)` · `UNIQUE (college_id, campus_id)` implied by the PK, which is

@@ -95,6 +95,14 @@ def refs(session, people):
     )
     session.commit()
 
+    # Since 15 September 2026 `campuses.city` references the City Dictionary.
+    session.execute(
+        text(
+            "INSERT INTO cities (city_name, state) VALUES ('Sydney', 'NSW'), ('Hobart', 'TAS') "
+            "ON CONFLICT (city_name) DO NOTHING"
+        )
+    )
+
     def campus(code, name, location, state, city, address=None):
         """Get-or-create, then set the dictionary columns to a known state."""
         found = session.execute(

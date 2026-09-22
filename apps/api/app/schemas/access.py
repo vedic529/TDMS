@@ -119,3 +119,12 @@ class NotificationOutcome(BaseModel):
 class SubmitAccessRequestResponse(BaseModel):
     request: AccessRequestSummary
     notification: NotificationOutcome
+
+
+class ActivityRecordCreate(BaseModel):
+    """A browser-side action whose audit record must be stored by the API."""
+
+    action: str
+    page_or_function: str = Field(..., min_length=1, max_length=300)
+    record_reference: str | None = Field(default=None, max_length=300)
+    detail: str = Field(..., min_length=1, max_length=2000)

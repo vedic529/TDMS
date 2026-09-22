@@ -203,6 +203,15 @@ class TestDataEditor:
         seed_people(session)
         assert client.get("/admin/overview", headers=as_user(client, EDITOR)).status_code == 403
 
+    def test_may_not_clear_the_student_records(self, client, session):
+        """Clearing every student record is Super Admin only (21 September 2026):
+        it deletes the recycle area too, so ordinary student maintenance is not
+        enough."""
+        seed_people(session)
+        editor = as_user(client, EDITOR)
+        assert client.get("/students/records/clear-preview", headers=editor).status_code == 403
+        assert client.delete("/students/records", headers=editor).status_code == 403
+
 
 class TestAdmin:
     def test_may_maintain_reference_data(self, client, session):
@@ -462,6 +471,40 @@ def test_activity_records_capture_the_workflow(client, session):
     actions = {r["action"] for r in records}
     assert "ACCESS_REQUEST_SUBMITTED" in actions
     assert "ACCESS_REQUEST_APPROVED" in actions
+
+
+def test_signed_in_user_can_record_an_export(client, session):
+    seed_people(session)
+    response = client.post(
+        "/me/activity-records",
+        headers=as_user(client, VIEWER),
+        json={
+            "action": "EXPORT",
+            "page_or_function": "Student Data",
+            "record_reference": "12 rows",
+            "detail": "Filtered student result exported (12 rows).",
+        },
+    )
+    assert response.status_code == 201
+
+    records = client.get("/admin/activity-records", headers=as_user(client, SUPER)).json()
+    exported = next(record for record in records if record["id"] == response.json()["id"])
+    assert exported["action"] == "EXPORT"
+    assert exported["userReference"] == VIEWER
+
+
+def test_browser_activity_endpoint_refuses_other_actions(client, session):
+    seed_people(session)
+    response = client.post(
+        "/me/activity-records",
+        headers=as_user(client, VIEWER),
+        json={
+            "action": "ROLE_CHANGED",
+            "page_or_function": "Administration",
+            "detail": "Attempted client-authored privileged activity.",
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_no_activity_record_carries_a_token_or_secret(client, session):

@@ -104,6 +104,49 @@ class TrainerDetailRead(BaseModel):
     qualifications: list[TrainerQualificationRead] = []
 
 
+class TrainerTimetableClassRead(BaseModel):
+    """One visible calendar item, merged by date, unit and classroom."""
+
+    class_key: str
+    session_ids: list[int]
+    unit_code: str
+    unit_title: str
+    classroom: str
+    colleges: list[str] = []
+    campuses: list[str] = []
+    times: list[str] = []
+    delivery_modes: list[str] = []
+    uoc_types: list[str] = []
+    streams: list[str] = []
+    co_trainers: list[str] = []
+    moodle_link: str | None = None
+
+
+class TrainerTimetableDayRead(BaseModel):
+    date: dt.date
+    classes: list[TrainerTimetableClassRead] = []
+
+
+class TrainerTimetableRead(BaseModel):
+    trainer_id: int
+    trainer_name: str
+    month: str
+    days: list[TrainerTimetableDayRead] = []
+
+
+class TrainerTimetableStudentRead(BaseModel):
+    id: int
+    student_id: str
+    first_name: str
+    last_name: str | None = None
+    coe_status: str
+
+
+class TrainerTimetableStudentList(BaseModel):
+    items: list[TrainerTimetableStudentRead] = []
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Unit coverage (2.7)
 # ---------------------------------------------------------------------------
@@ -327,6 +370,11 @@ class RowsPatch(BaseModel):
     override_decisions: dict[int, str] = {}
     #: The single action offered for a missing trainer (2.13.3).
     exclude_missing_trainers: bool = False
+    #: Rows whose broken rule is accepted for this import, and Undo for it.
+    accepted_exception_row_ids: list[int] = []
+    withdrawn_exception_row_ids: list[int] = []
+    #: Undo for an exclusion.
+    included_row_ids: list[int] = []
 
 
 class ImportApplyRead(BaseModel):

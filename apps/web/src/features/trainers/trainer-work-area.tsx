@@ -15,6 +15,7 @@ import { ActiveBadge } from '@/components/common/status-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { EmptyState, ErrorState } from '@/components/common/states';
 import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
+import { attributeList, attributeRecords } from '@/features/shared/suggestion-prefill';
 import { TrainerDetailPanel } from './trainer-detail-panel';
 import { TrainerUnitCoverage } from './trainer-unit-coverage';
 import { BulkTrainerImport } from './bulk-trainer-import';
@@ -115,7 +116,11 @@ function TrainerRecordsPanel() {
   const trainerPrefill = React.useMemo(
     () =>
       fromSuggestion.suggestion?.entity_type === 'TRAINER'
-        ? { name: fromSuggestion.suggestion.raw_value }
+        ? {
+            name: fromSuggestion.suggestion.raw_value,
+            campuses: attributeList(fromSuggestion.suggestion, 'campuses'),
+            units: attributeRecords(fromSuggestion.suggestion, 'units'),
+          }
         : null,
     [fromSuggestion.suggestion],
   );

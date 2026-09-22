@@ -8,12 +8,14 @@ import {
   ShieldAlert,
   TriangleAlert,
   Upload,
+  Undo2,
   UserRoundX,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { FileDropzone } from '@/components/common/file-dropzone';
@@ -28,10 +30,37 @@ import {
 
 type ApplyMode = 'MERGE' | 'REPLACE';
 
+/** The working value behind each field an issue can name, so its cell can be corrected here. */
+const EDITABLE_FIELDS: Record<string, string> = {
+  'Trainer id': 'trainer_id',
+  'Trainer ID': 'trainer_id',
+  'Trainer name': 'trainer_name',
+  'Trainer Campus': 'trainer_campus',
+  Location: 'location',
+  'Working Time': 'working_time',
+  'Delivery Type': 'delivery_type',
+  'Qualifications They Can Teach': 'qualification_code',
+  'Units They Can Teach': 'unit_code',
+};
+
+function fieldLabel(field: string): string {
+  return Object.entries(EDITABLE_FIELDS).find(([, key]) => key === field)?.[0] ?? field;
+}
+
+/** One correction made in this review, kept so it can be undone. */
+interface RowEdit {
+  rowId: number;
+  rowNumber: number;
+  field: string;
+  from: string;
+  to: string;
+}
+
 const ENTITY_LABEL: Record<string, string> = {
   CAMPUS: 'Campus',
   QUALIFICATION: 'Qualification',
   UNIT: 'Unit',
+  CITY: 'City',
 };
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -39,6 +68,8 @@ const SEVERITY_STYLE: Record<string, string> = {
   UNRESOLVED: 'text-destructive',
   UNMATCHED: 'text-destructive',
   RAISED: 'text-info',
+  EXCEPTION: 'text-destructive',
+  ACCEPTED: 'text-success',
   DUPLICATE: 'text-warning',
   WARNING: 'text-warning',
   NOTE: 'text-muted-foreground',
@@ -63,9 +94,11 @@ const STATUS_LABEL: Record<string, string> = {
  * The choice also selects the worksheet, which is why the supplied two-sheet
  * workbook can be uploaded as-is for either shape.
  *
- * An unresolved qualification or unit offers **Create Record or Map Record
- * only**. There is deliberately no accept-as-an-exception path (1.8): a unit
- * either exists in the reference data or it does not.
+ * What each issue offers is decided by its kind (approved 15 September 2026):
+ * a value that matches no approved record - a campus, qualification, unit or
+ * city - is raised as a suggestion; a broken rule, such as a city that disagrees
+ * with its campus, is accepted as an exception for this import only; a row that
+ * cannot be stored is excluded. Each decision can be undone.
  */
 export function BulkTrainerImport() {
   const { permissions } = useAuth();
@@ -77,11 +110,15 @@ export function BulkTrainerImport() {
   const [review, setReview] = React.useState<ImportReview | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [drafts, setDrafts] = React.useState<Record<string, string>>({});
+  const [edits, setEdits] = React.useState<RowEdit[]>([]);
 
   function reset() {
     setFile(null);
     setReview(null);
     setError(null);
+    setDrafts({});
+    setEdits([]);
   }
 
   async function stage(next: File) {
@@ -169,6 +206,58 @@ export function BulkTrainerImport() {
     }
   }
 
+  async function patchRows(
+    payload: Parameters<typeof trainersApi.patchImportRows>[1],
+    failure: string,
+  ): Promise<boolean> {
+    if (!review) return false;
+    setBusy(true);
+    try {
+      setReview(await trainersApi.patchImportRows(review.batch_id, payload));
+      return true;
+    } catch (caught) {
+      toast.error(failure, {
+        description: caught instanceof Error ? caught.message : 'Try again.',
+      });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Send the changed cells of one row; the whole batch is checked again. */
+  async function applyEdits(row: ImportReview['rows'][number]) {
+    const changes: Record<string, string> = {};
+    const made: RowEdit[] = [];
+    for (const field of new Set(Object.values(EDITABLE_FIELDS))) {
+      const draft = drafts[`${row.id}:${field}`];
+      const current = row.values[field] ?? '';
+      if (draft === undefined || draft === current) continue;
+      changes[field] = draft;
+      made.push({ rowId: row.id, rowNumber: row.row_number, field, from: current, to: draft });
+    }
+    if (made.length === 0) return;
+    if (await patchRows({ corrections: { [row.id]: changes } }, 'The edit could not be applied')) {
+      setEdits((current) => [
+        ...current.filter((edit) => !made.some((next) => next.rowId === edit.rowId && next.field === edit.field)),
+        // An edit of an edit still undoes to what the file said.
+        ...made.map((next) => ({
+          ...next,
+          from: current.find((edit) => edit.rowId === next.rowId && edit.field === next.field)?.from ?? next.from,
+        })),
+      ]);
+      setDrafts({});
+    }
+  }
+
+  async function undoEdit(edit: RowEdit) {
+    if (
+      await patchRows({ corrections: { [edit.rowId]: { [edit.field]: edit.from } } }, 'The edit could not be undone')
+    ) {
+      setEdits((current) => current.filter((item) => !(item.rowId === edit.rowId && item.field === edit.field)));
+    }
+  }
+
   async function confirm() {
     if (!review) return;
     setBusy(true);
@@ -224,6 +313,12 @@ export function BulkTrainerImport() {
   const blocked = review?.rows.filter(
     (row) => row.status !== 'READY' && row.status !== 'EXCLUDED_BY_USER',
   );
+  // Decisions taken on this review, each listed with its Undo.
+  const accepted =
+    review?.rows.filter(
+      (row) => row.status !== 'EXCLUDED_BY_USER' && row.issues.some((issue) => issue.severity === 'ACCEPTED'),
+    ) ?? [];
+  const excluded = review?.rows.filter((row) => row.status === 'EXCLUDED_BY_USER') ?? [];
 
   return (
     <div className="space-y-5">
@@ -330,9 +425,8 @@ export function BulkTrainerImport() {
                       <strong>Raising a suggestion lets the rows import</strong>, keeping the
                       value exactly as the file wrote it — the same way the timetable import
                       behaves. Resolving it later with <strong>Create Record</strong> or{' '}
-                      <strong>Map Record</strong> repairs every row that used it. A
-                      qualification or a unit either exists or it does not, so there is no
-                      accept-as-an-exception option here.
+                      <strong>Map Record</strong> repairs every row that used it. An unmatched
+                      value is never accepted as an exception.
                     </CardDescription>
                   </div>
                   {review.unresolved_values.some((value) => !value.raised_here) && (
@@ -516,10 +610,30 @@ export function BulkTrainerImport() {
                         <span className="truncate text-[12px] text-muted-foreground">
                           {Object.values(row.values).filter(Boolean).slice(0, 4).join(' · ')}
                         </span>
+                        {row.issues.some((issue) => issue.severity === 'EXCEPTION') && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="ml-auto h-7 text-[12px]"
+                            disabled={busy}
+                            onClick={() =>
+                              void patchRows(
+                                { accepted_exception_row_ids: [row.id] },
+                                'The exception could not be accepted',
+                              )
+                            }
+                          >
+                            Accept exception
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"
-                          className="ml-auto h-7 text-[12px]"
+                          className={
+                            row.issues.some((issue) => issue.severity === 'EXCEPTION')
+                              ? 'h-7 text-[12px]'
+                              : 'ml-auto h-7 text-[12px]'
+                          }
                           disabled={busy}
                           onClick={() => void excludeRow(row.id)}
                         >
@@ -539,6 +653,13 @@ export function BulkTrainerImport() {
                             </li>
                           ))}
                       </ul>
+                      <RowEditor
+                        row={row}
+                        drafts={drafts}
+                        busy={busy}
+                        onDraft={(field, value) => setDrafts((current) => ({ ...current, [`${row.id}:${field}`]: value }))}
+                        onApply={() => void applyEdits(row)}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -547,6 +668,96 @@ export function BulkTrainerImport() {
                     Showing the first 100 of {blocked.length}.
                   </p>
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* -- Decided for this import --------------------------------- */}
+          {(edits.length > 0 || accepted.length > 0 || excluded.length > 0) && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Decided for this import</CardTitle>
+                <CardDescription>
+                  Edits, accepted exceptions and excluded rows apply to this import only. Undo reverses
+                  each one.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="space-y-1.5">
+                  {edits.map((edit) => (
+                    <li
+                      key={`edit-${edit.rowId}-${edit.field}`}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-[12px]"
+                    >
+                      <span className="font-medium tabular">Row {edit.rowNumber}</span>
+                      <span className="min-w-0 break-words">
+                        {fieldLabel(edit.field)}: “{edit.from}” → “{edit.to}”
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto h-7 gap-1 text-[12px]"
+                        disabled={busy}
+                        onClick={() => void undoEdit(edit)}
+                      >
+                        <Undo2 aria-hidden="true" className="size-3.5" />
+                        Undo
+                      </Button>
+                    </li>
+                  ))}
+                  {accepted.map((row) => (
+                    <li
+                      key={`accepted-${row.id}`}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-success/35 bg-success-soft px-3 py-2 text-[12px]"
+                    >
+                      <span className="font-medium tabular">Row {row.row_number}</span>
+                      <span className="text-success">
+                        {row.issues.find((issue) => issue.severity === 'ACCEPTED')?.message}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto h-7 gap-1 text-[12px]"
+                        disabled={busy}
+                        onClick={() =>
+                          void patchRows(
+                            { withdrawn_exception_row_ids: [row.id] },
+                            'The decision could not be undone',
+                          )
+                        }
+                      >
+                        <Undo2 aria-hidden="true" className="size-3.5" />
+                        Undo
+                      </Button>
+                    </li>
+                  ))}
+                  {excluded.map((row) => (
+                    <li
+                      key={`excluded-${row.id}`}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px]"
+                    >
+                      <span className="font-medium tabular">Row {row.row_number}</span>
+                      <span className="truncate text-muted-foreground">
+                        Excluded ·{' '}
+                        {[row.values.trainer_id, row.values.trainer_name, row.values.location, row.values.unit_code]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto h-7 gap-1 text-[12px]"
+                        disabled={busy}
+                        onClick={() =>
+                          void patchRows({ included_row_ids: [row.id] }, 'The row could not be included again')
+                        }
+                      >
+                        <Undo2 aria-hidden="true" className="size-3.5" />
+                        Undo
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
               </CardContent>
             </Card>
           )}
@@ -603,6 +814,47 @@ export function BulkTrainerImport() {
           </Card>
         </>
       )}
+    </div>
+  );
+}
+
+/** The cells a row's issues name, editable in place. */
+function RowEditor({
+  row,
+  drafts,
+  busy,
+  onDraft,
+  onApply,
+}: {
+  row: ImportReview['rows'][number];
+  drafts: Record<string, string>;
+  busy: boolean;
+  onDraft: (field: string, value: string) => void;
+  onApply: () => void;
+}) {
+  const fields = Array.from(
+    new Set(
+      row.issues
+        .map((issue) => (issue.column_name ? EDITABLE_FIELDS[issue.column_name] : undefined))
+        .filter((field): field is string => Boolean(field)),
+    ),
+  );
+  if (fields.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-end gap-2">
+      {fields.map((field) => (
+        <label key={field} className="min-w-40 flex-1 space-y-1">
+          <span className="text-[11px] text-muted-foreground">{fieldLabel(field)}</span>
+          <Input
+            className="h-8 text-[13px]"
+            value={drafts[`${row.id}:${field}`] ?? row.values[field] ?? ''}
+            onChange={(event) => onDraft(field, event.target.value)}
+          />
+        </label>
+      ))}
+      <Button size="sm" variant="outline" className="h-8 text-[12px]" disabled={busy} onClick={onApply}>
+        Apply edit
+      </Button>
     </div>
   );
 }

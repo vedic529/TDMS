@@ -1,0 +1,6 @@
+{
+  "/(app)/timetable/page": "app/(app)/timetable/page.js",
+  "/(app)/students/page": "app/(app)/students/page.js",
+  "/(app)/trainers/page": "app/(app)/trainers/page.js",
+  "/(app)/reference-data/page": "app/(app)/reference-data/page.js"
+}

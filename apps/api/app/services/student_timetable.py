@@ -59,7 +59,6 @@ EMPTY_STATE_QUERY_COUNT = 1
 
 _VIRTUAL_LABELS = {
     "FACE_TO_FACE_VC": "Face to Face VC",
-    "FACE_TO_FACE_VIRTUAL": "Face to Face Virtual",
 }
 
 
@@ -171,10 +170,12 @@ def _load_scope(session: Session, student_pk: int) -> dict:
             StudentGroup.intake,
             OfferingDurationOption.duration_weeks,
         )
-        .join(CourseOffering, CourseOffering.id == Student.course_offering_id)
-        .join(College, College.id == CourseOffering.college_id)
-        .join(Campus, Campus.id == CourseOffering.campus_id)
-        .join(Qualification, Qualification.id == CourseOffering.qualification_id)
+        # Outer: an unverified student has no offering, and must still open to
+        # say so rather than claim the record does not exist.
+        .outerjoin(CourseOffering, CourseOffering.id == Student.course_offering_id)
+        .outerjoin(College, College.id == CourseOffering.college_id)
+        .outerjoin(Campus, Campus.id == CourseOffering.campus_id)
+        .outerjoin(Qualification, Qualification.id == CourseOffering.qualification_id)
         .outerjoin(StudentGroup, StudentGroup.id == Student.student_group_id)
         .outerjoin(
             OfferingDurationOption, OfferingDurationOption.id == Student.course_duration_option_id
@@ -190,9 +191,9 @@ def _load_scope(session: Session, student_pk: int) -> dict:
     return {
         "student": student,
         "college_id": row[1],
-        "college": row[2],
+        "college": row[2] or student.college_text or "",
         "campus_id": row[4],
-        "campus": row[5],
+        "campus": row[5] or student.campus_text or "",
         # Every spelling the student's own college and campus are known by, so a
         # delivery whose reference did not resolve can still be matched on the
         # text it was written as. Without this a class recorded at "Sydney"
@@ -215,6 +216,10 @@ def _load_scope(session: Session, student_pk: int) -> dict:
 def _empty_reason(scope: dict) -> str | None:
     """Which of the three "no timetable" states applies, if any."""
     student: Student = scope["student"]
+    if student.course_offering_id is None:
+        # Unverified (15 September 2026): no offering, so no campus to scope a
+        # timetable to until the student's suggestion resolves.
+        return "UNVERIFIED"
     if student.intake_match_status == "NOT_APPLICABLE":
         return "CREDIT_TRANSFER"
     if student.intake_match_status == "TBD":

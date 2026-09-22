@@ -56,7 +56,9 @@ class AllocationDelivery(Base, TimestampMixin):
             "end_date",
             name="uq_allocation_delivery_business_key",
         ),
-        CheckConstraint("end_date >= start_date", name="delivery_dates_ordered"),
+        # `delivery_dates_ordered` was dropped on 15 September 2026: an end date
+        # before the start is a rule the import checks, and one a person may
+        # accept as an exception.
         CheckConstraint("duration_weeks > 0", name="allocation_duration_positive"),
         # Operational queries always exclude quarantined rows; a partial index
         # keeps them off the quarantined minority.
@@ -187,20 +189,17 @@ class AllocationSession(Base, TimestampMixin):
             ondelete="CASCADE",
             name="fk_allocation_session_delivery",
         ),
-        CheckConstraint("end_time > start_time", name="session_times_ordered"),
+        # Integrity, not a rule a file can break: a virtual class has no room.
         CheckConstraint(
             "delivery_mode <> 'VIRTUAL' OR facility_id IS NULL",
             name="virtual_has_no_facility",
         ),
-        CheckConstraint(
-            "stream <> 'PRACTICAL' OR delivery_mode = 'PHYSICAL'",
-            name="practical_is_physical",
-        ),
-        CheckConstraint(
-            "stream <> 'MSCRIS' OR (weekday = 'SATURDAY' AND delivery_mode = 'VIRTUAL')",
-            name="mscris_saturday_virtual",
-        ),
-        CheckConstraint("stream = 'MSCRIS' OR weekday <> 'SATURDAY'", name="non_mscris_not_saturday"),
+        # The importer always stores MSCRIS as virtual, so that stays a check.
+        # Its Saturday half, the Saturday rule for other streams, practical being
+        # physical and a class ending after it starts were dropped on 15 September
+        # 2026: each is a predefined rule the import checks, and a person may
+        # accept a row that breaks one - which the database must then hold.
+        CheckConstraint("stream <> 'MSCRIS' OR delivery_mode = 'VIRTUAL'", name="mscris_virtual"),
         Index("ix_allocation_session_package_weekday", "training_package", "weekday"),
         Index(
             "ix_allocation_session_facility_weekday",
@@ -321,6 +320,14 @@ class ReferenceSuggestion(Base):
     normalised_value: Mapped[str] = mapped_column(Text, nullable=False)
     context: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     context_key: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The raising row's other values, for pre-filling the form Add opens
+    #: (approved 15 September 2026): a unit's title, the campus a room was named
+    #: at, the qualification a trainer was teaching. Outside the key - `context`
+    #: decides which entry a value is, and every value added to it would split
+    #: one entry into many. Lists accumulate across rows and imports.
+    attributes: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     source: Mapped[str] = mapped_column(enums.suggestion_source, nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

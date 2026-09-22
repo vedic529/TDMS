@@ -2,10 +2,8 @@
 
 FastAPI application service for the Timetable Database Management System.
 
-The HTTP surface is still a **skeleton**, but the service now owns the approved
-**Database Schema v1** — SQLAlchemy 2 models and the Alembic migration that builds
-them. No endpoint reads or writes the database yet, and the frontend continues to
-use `MockTdmsClient`.
+The service owns the approved **Database Schema v1**, its Alembic migrations,
+and the database-backed endpoints used by the Next.js frontend.
 
 ## What is implemented
 

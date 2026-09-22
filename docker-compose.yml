@@ -74,9 +74,10 @@ services:
       args:
         NEXT_PUBLIC_APP_ENV: ${APP_ENV:-development}
         NEXT_PUBLIC_API_URL: http://localhost:8000
-        NEXT_PUBLIC_TDMS_DATA_MODE: ${NEXT_PUBLIC_TDMS_DATA_MODE:-mock}
-        NEXT_PUBLIC_TDMS_AUTH_MODE: ${NEXT_PUBLIC_TDMS_AUTH_MODE:-mock}
-        NEXT_PUBLIC_TDMS_DEV_TOOLS: 'false'
+        NEXT_PUBLIC_ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID}
+        NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS: ${ENTRA_ALLOWED_TENANT_IDS}
+        NEXT_PUBLIC_ENTRA_API_SCOPE: ${ENTRA_API_SCOPE}
+        NEXT_PUBLIC_ENTRA_REDIRECT_URI: ${ENTRA_REDIRECT_URI:-http://localhost:3000/login}
     image: tdms-web:local
     container_name: tdms-web
     depends_on:

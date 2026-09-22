@@ -11,8 +11,6 @@
  */
 
 export type AppEnvironment = 'development' | 'staging' | 'production';
-export type DataMode = 'mock' | 'api';
-export type AuthMode = 'mock' | 'entra';
 
 function readString(value: string | undefined, fallback: string): string {
   const trimmed = value?.trim();
@@ -50,9 +48,6 @@ const entraAllowedTenantIds = readList(process.env.NEXT_PUBLIC_ENTRA_ALLOWED_TEN
 const isEntraConfigured =
   entraClientId !== '' && entraAllowedTenantIds.length > 0 && entraApiScope !== '';
 
-const requestedAuthMode = readString(process.env.NEXT_PUBLIC_TDMS_AUTH_MODE, 'mock') as AuthMode;
-const requestedDataMode = readString(process.env.NEXT_PUBLIC_TDMS_DATA_MODE, 'mock') as DataMode;
-
 /**
  * Why authentication cannot run, or null when it can.
  *
@@ -61,19 +56,13 @@ const requestedDataMode = readString(process.env.NEXT_PUBLIC_TDMS_DATA_MODE, 'mo
  * lets anybody in while looking like it is working correctly.
  */
 function authConfigurationError(): string | null {
-  if (requestedAuthMode === 'entra') {
-    if (isEntraConfigured) return null;
-    const missing = [
-      entraClientId === '' ? 'NEXT_PUBLIC_ENTRA_CLIENT_ID' : null,
-      entraAllowedTenantIds.length === 0 ? 'NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS' : null,
-      entraApiScope === '' ? 'NEXT_PUBLIC_ENTRA_API_SCOPE' : null,
-    ].filter(Boolean);
-    return `Microsoft sign-in is selected but not configured. Missing: ${missing.join(', ')}.`;
-  }
-  if (isProductionEnvironment) {
-    return 'NEXT_PUBLIC_TDMS_AUTH_MODE must be "entra" in production. Development sign-in is never a production fallback.';
-  }
-  return null;
+  if (isEntraConfigured) return null;
+  const missing = [
+    entraClientId === '' ? 'NEXT_PUBLIC_ENTRA_CLIENT_ID' : null,
+    entraAllowedTenantIds.length === 0 ? 'NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS' : null,
+    entraApiScope === '' ? 'NEXT_PUBLIC_ENTRA_API_SCOPE' : null,
+  ].filter(Boolean);
+  return `Microsoft sign-in is not configured. Missing: ${missing.join(', ')}.`;
 }
 
 const configurationError = authConfigurationError();
@@ -83,17 +72,7 @@ export const env = {
   appEnvironment,
   apiUrl: readString(process.env.NEXT_PUBLIC_API_URL, 'http://localhost:8000'),
 
-  /** `api` is honoured only when a base URL is present. */
-  dataMode: requestedDataMode,
-
-  /**
-   * The mode actually in force. Note there is no downgrade from `entra` to
-   * `mock`: if Entra is selected and unconfigured, sign-in is unavailable and
-   * `authConfigurationError` says why, rather than silently admitting people
-   * through the development adapter.
-   */
-  authMode: requestedAuthMode,
-  requestedAuthMode,
+  authMode: 'entra' as const,
   isEntraConfigured,
   authConfigurationError: configurationError,
   /** Whether sign-in can work at all right now. */
@@ -112,15 +91,6 @@ export const env = {
     apiScope: entraApiScope,
   },
 
-  /**
-   * Development access preview. Never enabled outside development, and never
-   * when real Entra sign-in is in force: it is a developer testing aid, not an
-   * authentication mechanism.
-   */
-  devToolsEnabled:
-    appEnvironment === 'development' &&
-    requestedAuthMode === 'mock' &&
-    readString(process.env.NEXT_PUBLIC_TDMS_DEV_TOOLS, 'true') === 'true',
 } as const;
 
 export const isProduction = isProductionEnvironment;

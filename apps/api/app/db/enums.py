@@ -99,12 +99,14 @@ allocation_weekday = _pg_enum(
     "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", name="allocation_weekday"
 )
 session_delivery_mode = _pg_enum("PHYSICAL", "VIRTUAL", name="session_delivery_mode")
-virtual_classroom_kind = _pg_enum(
-    "FACE_TO_FACE_VC", "FACE_TO_FACE_VIRTUAL", name="virtual_classroom_kind"
-)
+virtual_classroom_kind = _pg_enum("FACE_TO_FACE_VC", name="virtual_classroom_kind")
 intake_match_status = _pg_enum("MATCHED", "NOT_FOUND", name="intake_match_status")
 suggestion_entity_type = _pg_enum(
-    "COLLEGE", "CAMPUS", "QUALIFICATION", "UNIT", "FACILITY", "TRAINER", name="suggestion_entity_type"
+    "COLLEGE", "CAMPUS", "QUALIFICATION", "UNIT", "FACILITY", "TRAINER",
+    # ROLLING and CITY (15 September 2026): a class the rolling timetable does
+    # not account for, and a city the City Dictionary does not hold.
+    "ROLLING", "CITY",
+    name="suggestion_entity_type"
 )
 # EXCEPTION and WITHDRAWN (26 August 2026): an accepted exception is recorded
 # in this same table, distinguished by status, so a value cannot be pending and

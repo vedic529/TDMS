@@ -54,7 +54,12 @@ interface FacilityFormDialogProps {
    * From a suggestion: the room name seen, and the campus the server resolved
    * its address spelling to.
    */
-  prefill?: { reference?: string; campusId?: number } | null;
+  prefill?: {
+    reference?: string;
+    campusId?: number;
+    /** The colleges whose classes were timetabled in the room, as the file named them. */
+    collegeNames?: string[];
+  } | null;
   /** The new room, so a suggestion can be resolved onto it. */
   onCreated?: (facilityId: number) => void;
 }
@@ -115,6 +120,18 @@ export function FacilityFormDialog({
         ]);
         if (cancelled) return;
         setColleges(collegeRows);
+        const wantedColleges = new Set((prefill?.collegeNames ?? []).map((value) => value.trim().toUpperCase()));
+        if (wantedColleges.size > 0) {
+          setCollegeIds(
+            collegeRows
+              .filter(
+                (row) =>
+                  wantedColleges.has(row.college_short_name.trim().toUpperCase()) ||
+                  wantedColleges.has(row.college_full_name.trim().toUpperCase()),
+              )
+              .map((row) => row.id),
+          );
+        }
         setCampuses(campusRows);
         // The choosable values are whatever the stored rooms already use. This
         // keeps the lists true without a reference table for either, and stops a

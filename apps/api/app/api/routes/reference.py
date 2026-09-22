@@ -24,6 +24,8 @@ from app.models.course import CourseOffering
 from app.models.qualification import QualificationUnit
 from app.models.user import User
 from app.schemas import reference as schemas
+from app.services import campus_addresses as address_service
+from app.services import cities as city_service
 from app.services import facilities as facility_service
 from app.services import reference_data as service
 from app.services import trainers as trainer_service
@@ -594,6 +596,22 @@ def list_courses(
 
 
 @router.get(
+    "/courses/{offering_id}/detail",
+    response_model=schemas.CourseOfferingDetailRead,
+    responses=READ_RESPONSES,
+)
+def read_course_detail(
+    offering_id: int,
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """Everything recorded about one course record, for the side panel."""
+    return schemas.CourseOfferingDetailRead.model_validate(
+        service.course_offering_detail(session, offering_id)
+    )
+
+
+@router.get(
     "/courses/{offering_id}", response_model=schemas.CourseOfferingRead, responses=READ_RESPONSES
 )
 def read_course(
@@ -789,3 +807,95 @@ def list_eligible_facilities(
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error))
     return [_facility_read(entry.facility) for entry in eligible]
+
+
+# ===========================================================================
+# The City Dictionary (approved 15 September 2026)
+# ===========================================================================
+
+
+@router.get("/cities", response_model=list[schemas.CityRead], responses=READ_RESPONSES)
+def list_cities(
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """Every approved city and the campuses located in it."""
+    return city_service.list_cities(session)
+
+
+@router.post(
+    "/cities",
+    response_model=schemas.CityRead,
+    status_code=status.HTTP_201_CREATED,
+    responses=WRITE_RESPONSES,
+)
+def create_city(
+    payload: schemas.CityWrite,
+    actor: User = Depends(require_maintain_reference_data),
+    session: Session = Depends(get_db),
+):
+    return _commit(session, lambda: city_service.create_city(session, actor, payload.model_dump()))
+
+
+@router.put("/cities/{city_id}", response_model=schemas.CityRead, responses=WRITE_RESPONSES)
+def update_city(
+    city_id: int,
+    payload: schemas.CityWrite,
+    actor: User = Depends(require_maintain_reference_data),
+    session: Session = Depends(get_db),
+):
+    return _commit(
+        session, lambda: city_service.update_city(session, actor, city_id, payload.model_dump())
+    )
+
+
+# ===========================================================================
+# The Campus Address Dictionary (approved 16 September 2026)
+# ===========================================================================
+
+
+@router.get(
+    "/campus-addresses", response_model=list[schemas.CampusAddressRead], responses=READ_RESPONSES
+)
+def list_campus_addresses(
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    """Every approved college/campus combination and its full address."""
+    return address_service.list_entries(session)
+
+
+@router.post(
+    "/campus-addresses",
+    response_model=schemas.CampusAddressRead,
+    status_code=status.HTTP_201_CREATED,
+    responses=WRITE_RESPONSES,
+)
+def create_campus_address(
+    payload: schemas.CampusAddressWrite,
+    actor: User = Depends(require_maintain_reference_data),
+    session: Session = Depends(get_db),
+):
+    """Add a college/campus address. An unapproved combination is approved by it."""
+    return _commit(
+        session,
+        lambda: address_service.save_entry(session, actor, payload.model_dump(), creating=True),
+    )
+
+
+@router.put(
+    "/campus-addresses/{college_id}/{campus_id}",
+    response_model=schemas.CampusAddressRead,
+    responses=WRITE_RESPONSES,
+)
+def update_campus_address(
+    college_id: int,
+    campus_id: int,
+    payload: schemas.CampusAddressWrite,
+    actor: User = Depends(require_maintain_reference_data),
+    session: Session = Depends(get_db),
+):
+    values = {**payload.model_dump(), "college_id": college_id, "campus_id": campus_id}
+    return _commit(
+        session, lambda: address_service.save_entry(session, actor, values, creating=False)
+    )

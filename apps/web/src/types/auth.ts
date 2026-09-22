@@ -103,8 +103,7 @@ export interface AuthSession {
   signedInAt: IsoDateTime;
   /** AUTH-11: safe technical reference retained for authorised investigation. */
   correlationId: string;
-  /** Which adapter produced the session. Displayed so mock is never mistaken for production. */
-  provider: 'mock' | 'entra';
+  provider: 'entra';
 }
 
 export interface AuthFailure {

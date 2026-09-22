@@ -66,10 +66,6 @@ The approved schema must cover:
 
 ## Local development
 
-A local PostgreSQL 17 database (`tdms_dev`) runs in Docker and holds the approved
-schema — 27 tables, 1 view, 15 enum types — with **no rows**. No reference data
-and no user accounts have been inserted.
-
-The frontend is not yet connected to it. It still uses the prototype dataset held
-in browser storage under the `tdms.prototype.v1` keys, which contains demo records
-only and is never production information.
+A local PostgreSQL 17 database (`tdms_dev`) runs in Docker and is used by the
+FastAPI endpoints consumed by the frontend. Alembic creates and updates the
+schema; backend import scripts and application workflows populate its records.

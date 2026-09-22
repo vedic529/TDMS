@@ -19,19 +19,16 @@ import {
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { referenceApi } from '@/services/reference-api';
 import { trainersApi, type LocationWrite } from '@/services/trainers-api';
+import { plain as plainText } from '@/features/shared/suggestion-prefill';
 
 /**
- * The cities a trainer can be based in.
+ * The cities offered alongside the City Dictionary.
  *
- * A fixed list rather than the Location Dictionary, because no campus carries a
- * city yet — the column is new and every existing row is null, so deriving the
- * options would offer an empty dropdown. Once campuses record their city this
- * can read from `GET /reference/locations` instead.
+ * Since 15 September 2026 the options come from the City Dictionary. These four -
+ * the cities the trainer files use - are still offered beside it, so the form
+ * works on a database whose dictionary has not been filled in yet.
  */
-const CITY_OPTIONS = ['Sydney', 'Brisbane', 'Melbourne', 'Hobart'].map((value) => ({
-  value,
-  label: value,
-}));
+const FALLBACK_CITIES = ['Sydney', 'Brisbane', 'Melbourne', 'Hobart'];
 
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] as const;
 
@@ -97,8 +94,15 @@ export function AddTrainerDialog({
   onOpenChange: (open: boolean) => void;
   /** The new trainer, so a suggestion can be resolved onto it. */
   onCreated: (trainerId: number) => void;
-  /** From a suggestion: the trainer name as it was seen. */
-  prefill?: { name?: string } | null;
+  /**
+   * From a suggestion: the name as it was seen, the campuses the trainer was
+   * timetabled at, and the units they were teaching.
+   */
+  prefill?: {
+    name?: string;
+    campuses?: string[];
+    units?: Array<{ qualification?: string; unit?: string }>;
+  } | null;
 }) {
   const [name, setName] = React.useState('');
   const [city, setCity] = React.useState('');
@@ -109,6 +113,10 @@ export function AddTrainerDialog({
   const [units, setUnits] = React.useState<DraftUnits[]>([]);
   const [locationOpen, setLocationOpen] = React.useState(false);
   const [unitsOpen, setUnitsOpen] = React.useState(false);
+  const [cityOptions, setCityOptions] = React.useState(
+    FALLBACK_CITIES.map((value) => ({ value, label: value })),
+  );
+  const [seenAt, setSeenAt] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -116,6 +124,67 @@ export function AddTrainerDialog({
     setCity('');
     setLocations([]);
     setUnits([]);
+    setSeenAt(prefill?.campuses ?? []);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [cities, campuses] = await Promise.all([
+          referenceApi.listCities(),
+          referenceApi.listCampuses({ activeOnly: true }),
+        ]);
+        if (cancelled) return;
+        const names = Array.from(new Set([...cities.map((row) => row.city_name), ...FALLBACK_CITIES])).sort();
+        setCityOptions(names.map((value) => ({ value, label: value })));
+
+        // The city is read from the dictionary entry of the campuses the trainer
+        // was timetabled at. One city between them is filled in; two or more are
+        // left for the person to choose.
+        const seen = new Set((prefill?.campuses ?? []).map(plainText));
+        const matched = campuses.filter(
+          (row) =>
+            seen.has(plainText(row.campus_name)) ||
+            seen.has(plainText(row.campus_location)) ||
+            (row.source_addresses ?? []).some((spelling) => seen.has(plainText(spelling))),
+        );
+        const citiesSeen = new Set(
+          cities
+            .filter((row) => row.campuses.some((campus) => matched.some((match) => match.id === campus.id)))
+            .map((row) => row.city_name),
+        );
+        if (citiesSeen.size === 1) setCity(Array.from(citiesSeen)[0]);
+
+        // The units they were teaching, where each is an approved unit of an
+        // approved qualification. Anything else is not offered.
+        const wanted = prefill?.units ?? [];
+        if (wanted.length > 0) {
+          const qualifications = await referenceApi.listQualifications({ activeOnly: true });
+          const drafts: DraftUnits[] = [];
+          for (const code of Array.from(new Set(wanted.map((entry) => plainText(entry.qualification))))) {
+            const qualification = qualifications.find((row) => plainText(row.qualification_code) === code);
+            if (!qualification) continue;
+            const unitCodes = new Set(
+              wanted.filter((entry) => plainText(entry.qualification) === code).map((entry) => plainText(entry.unit)),
+            );
+            const approved = (await referenceApi.listUnits({ qualificationId: qualification.id })).filter((unit) =>
+              unitCodes.has(plainText(unit.unit_code)),
+            );
+            if (approved.length === 0) continue;
+            drafts.push({
+              qualification_id: qualification.id,
+              qualification_label: qualification.qualification_code ?? 'NA',
+              unit_ids: approved.map((unit) => unit.id),
+              unit_labels: approved.map((unit) => unit.unit_code),
+            });
+          }
+          if (!cancelled && drafts.length > 0) setUnits(drafts);
+        }
+      } catch {
+        // The form still works with the fallback cities and nothing pre-filled.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [open, prefill]);
 
   // Debounced: the id follows the name without a request per keystroke.
@@ -206,7 +275,7 @@ export function AddTrainerDialog({
                 <SimpleSelect
                   value={city}
                   onChange={setCity}
-                  options={CITY_OPTIONS}
+                  options={cityOptions}
                   placeholder="Choose City"
                 />
               </Field>
@@ -214,6 +283,12 @@ export function AddTrainerDialog({
 
             {/* -- Locations ------------------------------------------------ */}
             <div className="space-y-2">
+              {seenAt.length > 0 && locations.length === 0 && (
+                <p className="text-[12px] text-muted-foreground">
+                  Timetabled at {seenAt.join(', ')}. Add each location with the days and hours this trainer
+                  works there.
+                </p>
+              )}
               <AddTile
                 icon={MapPin}
                 label="Add location"

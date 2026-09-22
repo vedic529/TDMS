@@ -2,10 +2,16 @@
 
 import * as React from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { BookOpen, DoorOpen, GraduationCap, MapPin, Pencil, Plus, Trash2 } from 'lucide-react';
+import { BookOpen, BookText, Building2, ChevronDown, DoorOpen, GraduationCap, MapPin, Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PageHeader } from '@/components/common/page-header';
@@ -13,16 +19,24 @@ import { FilterBar, FilterField } from '@/components/common/filter-bar';
 import { SimpleSelect } from '@/components/common/dependent-select';
 import { DataTable, type DataTableColumn } from '@/components/common/data-table';
 import { EmptyState, ErrorState, ReadOnlyNotice } from '@/components/common/states';
-import { CourseStatusBadge } from '@/components/common/status-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { DeleteConfirmationDialog } from '@/components/common/delete-confirmation-dialog';
 import { RecycleAreaDialog } from '@/components/common/recycle-area-dialog';
 import { CourseFormDrawer } from './course-form-drawer';
 import { CourseFormDialog } from './course-form-dialog';
 import { LocationFormDialog } from './location-form-dialog';
+import { CampusAddressDictionaryDialog } from './campus-address-dictionary';
+import { CourseDetailPanel } from './course-detail-panel';
+import { CityDictionaryDialog, CityFormDialog } from './city-dictionary';
 import { FacilityDataPanel } from './facility-data-panel';
 import { QualificationUnitFormDialog } from './qualification-unit-form-dialog';
 import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
+import {
+  attributeList,
+  attributeRecords,
+  attributeText,
+  uocTypeFromAllocation,
+} from '@/features/shared/suggestion-prefill';
 import { useReferenceLookups } from './use-reference-lookups';
 import { useCascadingFilters } from './use-cascading-filters';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
@@ -32,7 +46,7 @@ import type { SelectOption } from '@/types/common';
 import { toCourseRecord, toQualificationUnit } from './reference-adapters';
 import { INTERFACE_NAMES, SRS_PAGE_REFERENCE } from '@/lib/interface-names';
 import { readOnlyReason } from '@/lib/permissions';
-import { formatCurrency, today } from '@/lib/format';
+import { today } from '@/lib/format';
 import type { ReasonCode } from '@/types/common';
 import type { CourseRecord, QualificationUnitSequence } from '@/types/reference';
 
@@ -105,6 +119,57 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
   const [loading, setLoading] = React.useState(true);
   const [formOpen, setFormOpen] = React.useState(false);
   const [locationOpen, setLocationOpen] = React.useState(false);
+  const [cityOpen, setCityOpen] = React.useState(false);
+  const [cityDictionaryOpen, setCityDictionaryOpen] = React.useState(false);
+  const [addressDictionaryOpen, setAddressDictionaryOpen] = React.useState(false);
+  // The table carries what identifies a record; everything else is in the panel.
+  const [openCourseId, setOpenCourseId] = React.useState<string | null>(null);
+  // The Campus Address Dictionary, keyed by college + campus: one campus name can
+  // be a different building for each college, so the campus's own address is only
+  // the fallback when the dictionary has none.
+  const [addresses, setAddresses] = React.useState<Map<string, string>>(new Map());
+  const loadAddresses = React.useCallback(async () => {
+    try {
+      const entries = await referenceApi.listCampusAddresses();
+      setAddresses(
+        new Map(
+          entries
+            .filter((entry) => entry.address)
+            .map((entry) => [`${entry.college_id}:${entry.campus_id}`, entry.address as string]),
+        ),
+      );
+    } catch {
+      setAddresses(new Map());
+    }
+  }, []);
+  React.useEffect(() => {
+    void loadAddresses();
+  }, [loadAddresses]);
+  /** College, then campus, then VET code, then qualification - all alphabetical. */
+  const orderedRows = React.useMemo(() => {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    const keyOf = (row: CourseRecord) => [
+      collegeById(row.collegeId)?.collegeShortName ?? '',
+      campusById(row.campusId)?.campusName ?? '',
+      row.qualificationCode,
+      row.qualificationTitle,
+    ];
+    return [...rows].sort((a, b) => {
+      const left = keyOf(a);
+      const right = keyOf(b);
+      for (let index = 0; index < left.length; index += 1) {
+        const delta = collator.compare(left[index], right[index]);
+        if (delta !== 0) return delta;
+      }
+      return 0;
+    });
+  }, [rows, collegeById, campusById]);
+
+  const locationOf = React.useCallback(
+    (row: { collegeId: string; campusId: string }) =>
+      addresses.get(`${row.collegeId}:${row.campusId}`) ?? campusById(row.campusId)?.campusLocation ?? '',
+    [addresses, campusById],
+  );
 
   // Adding a location or a qualification from a suggestion opens this tab's own
   // form, filled in from the entry, and resolves the entry when it saves.
@@ -114,17 +179,39 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       fromSuggestion.suggestion?.entity_type === 'CAMPUS'
         ? {
             name: fromSuggestion.suggestion.raw_value,
-            college: String(fromSuggestion.suggestion.context?.college ?? ''),
+            // A student file's campus carries its college beside the entry, not in it.
+            college:
+              String(fromSuggestion.suggestion.context?.college ?? '') ||
+              attributeText(fromSuggestion.suggestion, 'college'),
           }
         : null,
     [fromSuggestion.suggestion],
   );
   const qualificationPrefill = React.useMemo(() => {
-    if (fromSuggestion.suggestion?.entity_type !== 'QUALIFICATION') return null;
-    const value = fromSuggestion.suggestion.raw_value.trim();
+    const entry = fromSuggestion.suggestion;
+    if (entry?.entity_type !== 'QUALIFICATION') return null;
+    const value = entry.raw_value.trim();
+    // Where the raising rows taught it, so the form arrives with its locations.
+    const locations = attributeRecords(entry, 'locations').map((place) => ({
+      college: place.college,
+      campus: place.campus,
+      durationWeeks: place.duration_weeks,
+    }));
     // A national code has three letters and five digits; anything else is a title.
-    return /^[A-Z]{3}\d{5}$/i.test(value) ? { vetCode: value } : { title: value };
+    return /^[A-Z]{3}\d{5}$/i.test(value)
+      ? { vetCode: value, title: attributeText(entry, 'title'), locations }
+      : { title: value, locations };
   }, [fromSuggestion.suggestion]);
+  const cityPrefill = React.useMemo(
+    () =>
+      fromSuggestion.suggestion?.entity_type === 'CITY'
+        ? {
+            name: fromSuggestion.suggestion.raw_value,
+            campusNames: attributeList(fromSuggestion.suggestion, 'campuses'),
+          }
+        : null,
+    [fromSuggestion.suggestion],
+  );
   const [editing, setEditing] = React.useState<CourseRecord | null>(null);
   const [deleting, setDeleting] = React.useState<CourseRecord | null>(null);
   const [busy, setBusy] = React.useState(false);
@@ -227,23 +314,50 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       cascade.filters.qualificationIds.length,
   );
 
+  /**
+   * Six columns: what identifies a record (21 September 2026). Everything else -
+   * status, level, fields of education, cost, the address, who is enrolled - is
+   * in the side panel a row opens, so the table stays readable.
+   */
   const columns: DataTableColumn<CourseRecord>[] = [
     {
-      id: 'courseCode',
-      header: 'Course Code',
-      cell: (row) => <span className="font-medium text-foreground">{row.courseCode}</span>,
-      sortValue: (row) => row.courseCode,
+      id: 'college',
+      header: 'College',
+      cell: (row) => (
+        <span className="font-medium text-foreground">{collegeById(row.collegeId)?.collegeShortName ?? ''}</span>
+      ),
+      sortValue: (row) => collegeById(row.collegeId)?.collegeShortName ?? '',
     },
-    { id: 'qualificationCode', header: 'VET Code', cell: (row) => row.qualificationCode, sortValue: (row) => row.qualificationCode },
     {
-      id: 'courseStatus',
-      header: 'Course Status',
-      cell: (row) => <CourseStatusBadge status={row.courseStatus} />,
-      sortValue: (row) => row.courseStatus,
+      id: 'campus',
+      header: 'Campus',
+      cell: (row) => campusById(row.campusId)?.campusName ?? '',
+      sortValue: (row) => campusById(row.campusId)?.campusName ?? '',
+    },
+    {
+      id: 'location',
+      header: 'Location',
+      // The address of this college at this campus (Campus Address Dictionary),
+      // falling back to the campus's own address where none is recorded.
+      cell: (row) => {
+        const location = locationOf(row);
+        return (
+          <span className="block max-w-80 truncate" title={location}>
+            {location}
+          </span>
+        );
+      },
+      sortValue: (row) => locationOf(row),
+    },
+    {
+      id: 'qualificationCode',
+      header: 'VET Code',
+      cell: (row) => <span className="font-medium text-foreground">{row.qualificationCode}</span>,
+      sortValue: (row) => row.qualificationCode,
     },
     {
       id: 'qualificationTitle',
-      header: 'Course Name',
+      header: 'Qualification',
       cell: (row) => (
         <span className="block max-w-80 truncate" title={row.qualificationTitle}>
           {row.qualificationTitle}
@@ -251,53 +365,12 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       ),
       sortValue: (row) => row.qualificationTitle,
     },
-    { id: 'courseLevel', header: 'Course Level', cell: (row) => row.courseLevel, sortValue: (row) => row.courseLevel },
-    {
-      id: 'foeBroad',
-      header: 'Field of Education - Broad',
-      cell: (row) => (
-        <span className="block max-w-56 truncate" title={row.fieldOfEducationBroad}>
-          {row.fieldOfEducationBroad}
-        </span>
-      ),
-    },
-    {
-      id: 'foeNarrow',
-      header: 'Field of Education - Narrow',
-      cell: (row) => (
-        <span className="block max-w-56 truncate" title={row.fieldOfEducationNarrow}>
-          {row.fieldOfEducationNarrow}
-        </span>
-      ),
-    },
-    { id: 'courseSector', header: 'Course Sector', cell: (row) => row.courseSector },
     {
       id: 'duration',
       header: 'Duration in Weeks',
       cell: (row) => row.durationInWeeks,
       sortValue: (row) => row.durationInWeeks,
       align: 'right',
-    },
-    {
-      id: 'cost',
-      header: 'Total Course Cost',
-      cell: (row) => formatCurrency(row.totalCourseCost),
-      sortValue: (row) => row.totalCourseCost,
-      align: 'right',
-    },
-    {
-      id: 'location',
-      header: 'Location',
-      // C-3: SRS 8.2 - Location represents the Campus value, so it is derived
-      // from the approved campus rather than stored as free text.
-      cell: (row) => {
-        const location = campusById(row.campusId)?.campusLocation ?? '';
-        return (
-          <span className="block max-w-72 truncate" title={location}>
-            {location}
-          </span>
-        );
-      },
     },
   ];
 
@@ -330,20 +403,45 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
               key={fromSuggestion.epoch}
               // Qualification entries live here now: Add Qualification is this
               // tab's form. A college cannot be created, so it is mapped only.
-              entityTypes={['COLLEGE', 'CAMPUS', 'QUALIFICATION']}
+              // A city a file named that the City Dictionary does not hold is
+              // added here too: the dictionary holds this tab's locations.
+              entityTypes={['COLLEGE', 'CAMPUS', 'QUALIFICATION', 'CITY']}
               onResolved={() => void load()}
               onAdd={(row) => {
                 fromSuggestion.start(row);
                 if (row.entity_type === 'CAMPUS') {
                   setLocationOpen(true);
+                } else if (row.entity_type === 'CITY') {
+                  setCityOpen(true);
                 } else {
                   setEditing(null);
                   setFormOpen(true);
                 }
               }}
             />
+            {/* One menu, not a button per dictionary: the toolbar does not
+                shrink, so each extra button squeezes the filters beside it. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline">
+                  <BookText aria-hidden="true" />
+                  Dictionaries
+                  <ChevronDown aria-hidden="true" className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setCityDictionaryOpen(true)}>
+                  <Building2 aria-hidden="true" className="size-4" />
+                  City Dictionary
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setAddressDictionaryOpen(true)}>
+                  <MapPin aria-hidden="true" className="size-4" />
+                  Address Dictionary
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <ExportMenu
-              rows={rows}
+              rows={orderedRows}
               baseFileName={`tdms-course-data-${today()}`}
               pageReference={SRS_PAGE_REFERENCE.courseData}
               columns={[
@@ -357,7 +455,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
                 { header: 'Course Sector', value: (row) => row.courseSector },
                 { header: 'Duration in Weeks', value: (row) => row.durationInWeeks },
                 { header: 'Total Course Cost', value: (row) => row.totalCourseCost },
-                { header: 'Location', value: (row) => campusById(row.campusId)?.campusLocation ?? '' },
+                { header: 'Location', value: (row) => locationOf(row) },
                 { header: 'College', value: (row) => collegeById(row.collegeId)?.collegeFullName ?? '' },
                 { header: 'Campus', value: (row) => campusById(row.campusId)?.campusName ?? '' },
               ]}
@@ -449,11 +547,11 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
       <DataTable
         ariaLabel="Course data"
         columns={columns}
-        rows={rows}
+        rows={orderedRows}
         rowKey={(row) => row.id}
+        onRowClick={(row) => setOpenCourseId(row.id)}
         loading={loading}
         loadingLabel="Loading course data…"
-        initialSort={{ columnId: 'courseCode', direction: 'asc' }}
         empty={
           loadError ? (
             <ErrorState title="Course records could not be loaded" description={loadError} />
@@ -543,6 +641,46 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         onSaved={() => void load()}
       />
 
+      <CityFormDialog
+        open={cityOpen}
+        onOpenChange={(open) => {
+          setCityOpen(open);
+          if (!open) fromSuggestion.cancel();
+        }}
+        prefill={cityPrefill}
+        onSaved={(city) => void fromSuggestion.finish(city.id).then(() => load())}
+      />
+      <CityDictionaryDialog
+        open={cityDictionaryOpen}
+        onOpenChange={setCityDictionaryOpen}
+        canMaintain={canMaintain}
+      />
+      <CourseDetailPanel
+        courseId={openCourseId}
+        onOpenChange={(open) => {
+          if (!open) setOpenCourseId(null);
+        }}
+        onEdit={
+          canMaintain
+            ? () => {
+                const record = rows.find((row) => row.id === openCourseId);
+                if (!record) return;
+                setEditing(record);
+                setFormOpen(true);
+              }
+            : undefined
+        }
+      />
+
+      <CampusAddressDictionaryDialog
+        open={addressDictionaryOpen}
+        onOpenChange={(next) => {
+          setAddressDictionaryOpen(next);
+          if (!next) void loadAddresses();
+        }}
+        canMaintain={canMaintain}
+      />
+
       {deleting && (
         <DeleteConfirmationDialog
           open
@@ -555,7 +693,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
             secondary: deleting.qualificationTitle,
             lines: [
               `Current status: ${deleting.courseStatus}`,
-              campusById(deleting.campusId)?.campusLocation ?? '',
+              locationOf(deleting),
             ],
           }}
           onConfirm={confirmDelete}
@@ -579,7 +717,7 @@ function CourseDataPanel({ initialSearch }: { initialSearch: string }) {
         describe={(row) => ({
           primary: row.courseCode,
           secondary: row.qualificationTitle,
-          lines: [campusById(row.campusId)?.campusLocation ?? ''],
+          lines: [locationOf(row)],
         })}
         onRestore={async (row, reason, reasonDetail) => {
           if (!user) return;
@@ -611,6 +749,8 @@ function QualificationUnitPanel() {
         ? {
             unitCode: fromSuggestion.suggestion.raw_value,
             qualificationCode: String(fromSuggestion.suggestion.context?.qualification ?? ''),
+            unitTitle: attributeText(fromSuggestion.suggestion, 'unit_title'),
+            uocType: uocTypeFromAllocation(attributeText(fromSuggestion.suggestion, 'uoc_type')),
           }
         : null,
     [fromSuggestion.suggestion],

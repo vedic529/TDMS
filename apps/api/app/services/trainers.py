@@ -952,26 +952,14 @@ def clear_trainer_records(session: Session, user: User) -> dict:
 
     removed = clear_preview(session)
 
-    # One row per distinct name and college — the context a TRAINER value
-    # carries, matching what the allocation import raises.
+    # One row per distinct name - the key a TRAINER value carries, matching what
+    # the allocation import raises. Not per college since 15 September 2026: a
+    # trainer is not held per college, and one name was split into an entry per
+    # college that each resolved the same sessions.
     groups = session.execute(
-        select(
-            AllocationSession.trainer_text.label("name"),
-            func.coalesce(College.college_short_name, AllocationDelivery.college_text).label(
-                "college"
-            ),
-            func.count().label("sessions"),
-        )
-        .join(
-            AllocationDelivery,
-            and_(
-                AllocationDelivery.id == AllocationSession.delivery_id,
-                AllocationDelivery.training_package == AllocationSession.training_package,
-            ),
-        )
-        .outerjoin(College, College.id == AllocationDelivery.college_id)
+        select(AllocationSession.trainer_text.label("name"), func.count().label("sessions"))
         .where(AllocationSession.trainer_id.is_not(None))
-        .group_by(AllocationSession.trainer_text, College.college_short_name, AllocationDelivery.college_text)
+        .group_by(AllocationSession.trainer_text)
     ).all()
 
     session.execute(
@@ -988,7 +976,7 @@ def clear_trainer_records(session: Session, user: User) -> dict:
             session,
             entity_type="TRAINER",
             raw_value=group.name,
-            context={"college": group.college} if group.college else {},
+            context={},
             source=_ALLOCATION_SOURCE,
         )
         raised += 1

@@ -21,6 +21,43 @@ def _normalise(raw: str) -> str:
     return " ".join(raw.upper().split())
 
 
+#: How many distinct values one attribute list keeps. A trainer seen at forty
+#: campuses needs the campuses listed for a form, not an unbounded column.
+_ATTRIBUTE_LIST_CAP = 50
+
+
+def _is_empty(value: object) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def merge_attributes(held: dict | None, incoming: dict | None) -> dict:
+    """Combine the pre-fill values an entry already holds with a new row's.
+
+    A list gathers every distinct item across rows and imports - the campuses a
+    trainer was seen at, the classes a unit ran in. A single value keeps the
+    first one supplied: the first spelling of a unit title is as good as the
+    next, and replacing it on every import would make the form flicker between
+    sources for no gain.
+    """
+    merged = dict(held or {})
+    for key, value in (incoming or {}).items():
+        if _is_empty(value):
+            continue
+        current = merged.get(key)
+        if isinstance(value, list):
+            items = list(current) if isinstance(current, list) else []
+            seen = {json.dumps(item, sort_keys=True) for item in items}
+            for item in value:
+                marker = json.dumps(item, sort_keys=True)
+                if marker not in seen:
+                    seen.add(marker)
+                    items.append(item)
+            merged[key] = items[:_ATTRIBUTE_LIST_CAP]
+        elif _is_empty(current):
+            merged[key] = value
+    return merged
+
+
 def raise_reference_suggestion(
     session: Session,
     *,
@@ -28,12 +65,17 @@ def raise_reference_suggestion(
     raw_value: str,
     context: dict,
     source: str,
+    attributes: dict | None = None,
+    occurrences: int = 1,
 ) -> bool:
     """Record an unmatched value, or increment an existing pending one.
 
     Returns True when a new suggestion row is created, False when an existing one
     is incremented — so a value seen on 30 rows is one suggestion with
     `occurrence_count` 30 (check R6).
+
+    `attributes` are the raising row's other values, kept for pre-filling the
+    form Add opens. They never decide which entry a value is - `context` does.
     """
     entity_type = entity_type.upper()
     normalised = _normalise(raw_value)
@@ -49,8 +91,9 @@ def raise_reference_suggestion(
     ).scalar_one_or_none()
 
     if existing is not None:
-        existing.occurrence_count += 1
+        existing.occurrence_count += occurrences
         existing.last_seen_at = now
+        existing.attributes = merge_attributes(existing.attributes, attributes)
         if existing.status != "PENDING":
             was_rejected = existing.status == "REJECTED"
             existing.status = "PENDING"
@@ -78,91 +121,13 @@ def raise_reference_suggestion(
             context=context,
             context_key=context_key,
             source=source,
-            occurrence_count=1,
+            occurrence_count=occurrences,
             first_seen_at=now,
             last_seen_at=now,
             status="PENDING",
+            attributes=merge_attributes({}, attributes),
         )
     )
     session.flush()
     return True
 
-
-def record_reference_exception(
-    session: Session,
-    *,
-    entity_type: str,
-    raw_value: str,
-    context: dict,
-    source: str,
-    user_id: int,
-    note: str | None = None,
-    occurrences: int = 1,
-) -> tuple[ReferenceSuggestion | None, str | None]:
-    """Record that an unmatched value was accepted as an exception.
-
-    An exception lives in this same table, distinguished by `status`, so a value
-    cannot be pending and excepted at once and promoting one later reuses the
-    resolve path unchanged.
-
-    Returns `(row, warning)`. A warning is returned instead of a row when the
-    value has already been decided — an already approved or rejected entry is
-    never silently reopened as an exception.
-
-    Called at **apply** time, in the same transaction as the rows that depend on
-    it, so an abandoned review leaves nothing behind.
-    """
-    entity_type = entity_type.upper()
-    normalised = _normalise(raw_value)
-    context_key = json.dumps(context, sort_keys=True)
-    now = dt.datetime.now(dt.timezone.utc)
-
-    existing = session.execute(
-        select(ReferenceSuggestion).where(
-            ReferenceSuggestion.entity_type == entity_type,
-            ReferenceSuggestion.normalised_value == normalised,
-            ReferenceSuggestion.context_key == context_key,
-        )
-    ).scalar_one_or_none()
-
-    if existing is not None:
-        if existing.status in {"ADDED", "MAPPED", "REJECTED"}:
-            return None, (
-                f"{entity_type.title()} '{raw_value}' has already been decided "
-                f"({existing.status.lower()}). It was not reopened as an exception — "
-                "re-run the import against the approved data."
-            )
-        existing.occurrence_count += occurrences
-        existing.last_seen_at = now
-        if existing.status != "EXCEPTION":
-            # A pending entry the user has now decided about.
-            existing.status = "EXCEPTION"
-            existing.accepted_by_user_id = user_id
-            existing.accepted_at = now
-            if note:
-                existing.exception_note = note
-        # An existing exception keeps its original acceptance: the first
-        # acceptance is the decision of record.
-        session.flush()
-        return existing, None
-
-    row = ReferenceSuggestion(
-        entity_type=entity_type,
-        raw_value=raw_value,
-        normalised_value=normalised,
-        context=context,
-        context_key=context_key,
-        source=source,
-        # How many rows depend on this exception, not how many times it was
-        # accepted: the review counts the rows before writing (rule 1.9).
-        occurrence_count=occurrences,
-        first_seen_at=now,
-        last_seen_at=now,
-        status="EXCEPTION",
-        accepted_by_user_id=user_id,
-        accepted_at=now,
-        exception_note=note,
-    )
-    session.add(row)
-    session.flush()
-    return row, None

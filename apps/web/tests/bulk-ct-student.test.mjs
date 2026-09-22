@@ -6,7 +6,7 @@
  * it decides whether Group, Intake and Course Duration Option apply at all.
  *
  * The runner has no bundler, so this mirrors the normalisation in
- * `mock-tdms-client.ts`. Keep the two in step.
+ * the student import rules. Keep the fixture and validation expectations in step.
  */
 
 import assert from 'node:assert/strict';

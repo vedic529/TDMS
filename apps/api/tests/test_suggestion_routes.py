@@ -54,24 +54,13 @@ def admin(session, people):
 
 @pytest.fixture()
 def queued(session, refs):
-    """Two pending entries and one accepted exception."""
+    """Two pending entries. Recorded exceptions went on 15 September 2026."""
     session.execute(text("TRUNCATE TABLE reference_suggestion RESTART IDENTITY CASCADE"))
     raise_reference_suggestion(
         session, entity_type="FACILITY", raw_value="Room X", context={}, source="ALLOCATION_IMPORT"
     )
     raise_reference_suggestion(
         session, entity_type="TRAINER", raw_value="Someone", context={}, source="ALLOCATION_IMPORT"
-    )
-    from app.services.reference_suggestions import record_reference_exception
-
-    editor = session.execute(select(User).where(User.organisation_email == EDITOR)).scalar_one()
-    record_reference_exception(
-        session,
-        entity_type="FACILITY",
-        raw_value="Tolerated Room",
-        context={},
-        source="ALLOCATION_IMPORT",
-        user_id=editor.id,
     )
     session.commit()
     return True
@@ -96,7 +85,7 @@ def test_e1_summary_is_one_grouped_query(client, queued, test_engine):
     # Every entity is present, so a tab can render a stable grey indicator.
     assert set(body) >= {"COLLEGE", "CAMPUS", "QUALIFICATION", "UNIT", "FACILITY", "TRAINER"}
     assert body["FACILITY"]["pending"] == 1
-    assert body["FACILITY"]["exceptions"] == 1
+    assert body["FACILITY"]["exceptions"] == 0
     assert body["TRAINER"]["pending"] == 1
     assert body["COLLEGE"]["pending"] == 0
     assert len(statements) == 1, f"summary issued {len(statements)} queries, expected 1"
@@ -126,20 +115,8 @@ def test_e2_list_can_span_the_entities_a_tab_owns(client, queued):
     assert response.json()["total"] == 2
 
 
-def test_e2_exceptions_are_listed_separately(client, queued):
-    """The dialog's Exceptions section is the same endpoint, another status."""
-    response = client.get(
-        "/suggestions", params={"status": "EXCEPTION"}, headers=as_user(VIEWER)
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total"] == 1
-    assert body["items"][0]["raw_value"] == "Tolerated Room"
-    assert body["items"][0]["accepted_at"] is not None
-
-
-def test_e3_resolve_accepts_the_four_actions(client, session, queued, admin, refs):
-    """E3 — CREATE, MAP, REJECT and WITHDRAW are all accepted."""
+def test_e3_resolve_accepts_create_map_and_reject(client, session, queued, admin, refs):
+    """E3 — amended 15 September 2026: Withdraw went with recorded exceptions."""
     facility = session.execute(
         select(ReferenceSuggestion).where(
             ReferenceSuggestion.entity_type == "FACILITY", ReferenceSuggestion.status == "PENDING"
@@ -157,14 +134,13 @@ def test_e3_resolve_accepts_the_four_actions(client, session, queued, admin, ref
     # The count is part of the contract: zero must be showable as a warning.
     assert "records_updated" in body
 
-    exception = session.execute(
-        select(ReferenceSuggestion).where(ReferenceSuggestion.status == "EXCEPTION")
+    trainer = session.execute(
+        select(ReferenceSuggestion).where(ReferenceSuggestion.entity_type == "TRAINER")
     ).scalars().one()
     withdrawn = client.post(
-        f"/suggestions/{exception.id}/resolve", json={"action": "WITHDRAW"}, headers=as_user(admin)
+        f"/suggestions/{trainer.id}/resolve", json={"action": "WITHDRAW"}, headers=as_user(admin)
     )
-    assert withdrawn.status_code == 200
-    assert withdrawn.json()["suggestion"]["status"] == "PENDING"
+    assert withdrawn.status_code == 400, "Withdraw is no longer an action"
 
 
 def test_e3_resolve_requires_maintain_reference_data(client, session, queued):

@@ -19,6 +19,7 @@ from app.models.allocation import AllocationDelivery, AllocationSession, Referen
 from app.models.user import User
 from app.services.allocation_import import ImportOverrides, apply_rows, validate_bytes
 from app.services import reference_suggestion_service as suggestions
+from app.services.rolling_timetable_import import raise_membership_gaps as suggestions_raise
 
 from tests.test_allocation_records import (  # reuse the approved fixtures
     EDITOR,
@@ -280,14 +281,20 @@ def test_r9_a_row_resolved_to_another_record_is_untouched(session, refs):
 # ---------------------------------------------------------------------------
 
 
-def test_q1_q2_rejecting_a_campus_quarantines_and_keeps_everything(session, refs):
-    """Q1/Q2 — rows retained, marked, reason recorded, nothing deleted."""
+def test_q1_q2_rejecting_a_campus_deletes_the_classes_that_carry_it(session, refs):
+    """Q1/Q2 - amended 16 September 2026.
+
+    Rejecting used to quarantine: the rows stayed, marked and hidden from every
+    view. An unapproved value is not a record TDMS holds, so the classes built on
+    it are deleted, and their class days go with them.
+    """
     rows = [
         base_row(refs, **{"Campus Location": "Reject Me", "Units of Competency ID": f"Q{n}"})
         for n in range(12)
     ]
     _apply(session, rows, refs)
     before = session.execute(select(func.count()).select_from(AllocationDelivery)).scalar_one()
+    sessions_before = session.execute(select(func.count()).select_from(AllocationSession)).scalar_one()
     entry = _entry(session, "CAMPUS")
 
     _row, updated = suggestions.resolve_suggestion(
@@ -296,21 +303,15 @@ def test_q1_q2_rejecting_a_campus_quarantines_and_keeps_everything(session, refs
     assert updated == 12
 
     after = session.execute(select(func.count()).select_from(AllocationDelivery)).scalar_one()
-    assert after == before, "rejecting must not delete a single row"
-
-    quarantined = session.execute(
-        select(AllocationDelivery).where(AllocationDelivery.is_quarantined.is_(True))
-    ).scalars().all()
-    assert len(quarantined) == 12
-    for row in quarantined:
-        assert row.quarantine_reason and "Reject Me" in row.quarantine_reason
-        assert row.quarantined_at is not None
-        assert row.quarantined_by_user_id is not None
-        assert row.campus_text == "Reject Me", "the text is retained"
+    assert after == before - 12, "the classes carrying the rejected value are gone"
+    assert session.execute(select(func.count()).select_from(AllocationSession)).scalar_one() < sessions_before, (
+        "the class days go with their class"
+    )
+    assert entry.status == "REJECTED"
 
 
-def test_q3_quarantined_rows_leave_the_operational_views(session, refs):
-    """Q3 — the calendar never returns a quarantined delivery."""
+def test_q3_a_rejected_value_leaves_the_operational_views(session, refs):
+    """Q3 - the calendar returns nothing for a rejected value, because it is gone."""
     from app.services.allocation_calendar import calendar_month
 
     _apply(session, [base_row(refs, **{"Campus Location": "Hide Me"})], refs)
@@ -322,6 +323,42 @@ def test_q3_quarantined_rows_leave_the_operational_views(session, refs):
         session, training_package="BSB", start_date=date(2026, 1, 19), end_date=date(2026, 2, 8)
     )
     assert all(not day["sessions"] for day in payload["days"])
+
+
+def test_q4_rejecting_a_membership_gap_never_cuts_the_rolling_timetable(session, refs):
+    """A unit a qualification does not list is a gap in the qualification.
+
+    The approved rolling timetable is not the thing at fault, and nothing else
+    could rebuild it, so its weeks are left exactly as they are.
+    """
+    session.execute(text("DELETE FROM rolling_timetable_weeks WHERE intake_label = 'Q4_KEEP_Intake'"))
+    session.execute(
+        text(
+            "INSERT INTO rolling_timetable_weeks "
+            "(training_package, qualification_code, duration_weeks, intake_label, intake_group, "
+            " intake_start_date, week_no, week_start_date, week_end_date, schedule_type, "
+            " schedule_value, unit_code, unit_count, unit_slot) "
+            "VALUES ('BSB', 'BSB50420', 52, 'Q4_KEEP_Intake', 'NA', DATE '2030-01-07', 1, "
+            " DATE '2030-01-07', DATE '2030-01-13', 'UNIT', 'ZZGAP01', 'ZZGAP01', 1, 1)"
+        )
+    )
+    session.flush()
+    raised = suggestions_raise(session)
+    entry = session.execute(
+        select(ReferenceSuggestion).where(
+            ReferenceSuggestion.entity_type == "UNIT", ReferenceSuggestion.raw_value == "ZZGAP01"
+        )
+    ).scalars().one()
+
+    suggestions.resolve_suggestion(
+        session, _editor(session), suggestion_id=entry.id, action="REJECT"
+    )
+    kept = session.execute(
+        text("SELECT count(*) FROM rolling_timetable_weeks WHERE intake_label = 'Q4_KEEP_Intake'")
+    ).scalar_one()
+    assert kept == 1, "the rolling timetable is untouched"
+    assert entry.status == "REJECTED"
+    assert raised
 
 
 def test_q5_q6_rejecting_a_facility_clears_but_does_not_quarantine(session, refs):
@@ -361,23 +398,23 @@ def test_q5_q6_rejecting_a_facility_clears_but_does_not_quarantine(session, refs
     assert quarantined == 0
 
 
-def test_q7_re_raising_lifts_the_quarantine(session, refs):
-    """Q7 — a mistaken rejection is recoverable by importing the value again."""
+def test_q7_importing_the_value_again_undoes_a_mistaken_rejection(session, refs):
+    """Q7 - amended 16 September 2026.
+
+    A rejection deletes the rows, so the way back is the file: importing it again
+    writes them afresh and returns the entry to the queue for a proper decision.
+    """
     _apply(session, [base_row(refs, **{"Campus Location": "Oops Campus"})], refs)
     entry = _entry(session, "CAMPUS")
     suggestions.resolve_suggestion(session, _editor(session), suggestion_id=entry.id, action="REJECT")
-    assert session.execute(
-        select(func.count()).select_from(AllocationDelivery).where(AllocationDelivery.is_quarantined.is_(True))
-    ).scalar_one() == 1
+    assert session.execute(select(func.count()).select_from(AllocationDelivery)).scalar_one() == 0
 
     _apply(session, [base_row(refs, **{"Campus Location": "Oops Campus"})], refs)
     session.expire_all()
 
     reopened = session.get(ReferenceSuggestion, entry.id)
     assert reopened.status == "PENDING"
-    assert session.execute(
-        select(func.count()).select_from(AllocationDelivery).where(AllocationDelivery.is_quarantined.is_(True))
-    ).scalar_one() == 0
+    assert session.execute(select(func.count()).select_from(AllocationDelivery)).scalar_one() == 1
 
 
 def test_q8_every_reject_is_logged(session, refs):
@@ -550,15 +587,17 @@ def test_d5_intake_matching_is_case_insensitive(session, refs):
     assert delivery.intake_match_status == "MATCHED", "lowercase rolling data must still match"
 
 
-def test_q4_administrators_can_list_quarantined_rows(session, refs, client):
-    """Q4 — `?quarantined=true` returns only quarantined rows, with their reasons.
+def test_q4_a_rejected_value_leaves_no_row_behind(session, refs, client):
+    """Q4 - amended 16 September 2026.
 
-    They are excluded from the default list, so an operational view never shows
-    them, but they stay reachable so a mistaken rejection can be found.
+    This checked that a rejected row stayed, reachable through
+    `?quarantined=true`. Rejecting now deletes what carries the unapproved
+    value, so neither list holds it - and the filter itself stays for the rows an
+    earlier rejection quarantined.
     """
     from tests.test_allocation_records import VIEWER, as_user
 
-    _apply(session, [base_row(refs, **{"Campus Location": "Quarantine Me"})], refs)
+    _apply(session, [base_row(refs, **{"Campus Location": "Reject Me Fully"})], refs)
     entry = _entry(session, "CAMPUS")
     suggestions.resolve_suggestion(session, _editor(session), suggestion_id=entry.id, action="REJECT")
     session.commit()
@@ -567,7 +606,7 @@ def test_q4_administrators_can_list_quarantined_rows(session, refs, client):
         "/allocation/deliveries", params={"training_package": "BSB"}, headers=as_user(VIEWER)
     )
     assert operational.status_code == 200
-    assert operational.json()["total"] == 0, "a quarantined row must not appear operationally"
+    assert operational.json()["total"] == 0
 
     quarantined = client.get(
         "/allocation/deliveries",
@@ -575,7 +614,7 @@ def test_q4_administrators_can_list_quarantined_rows(session, refs, client):
         headers=as_user(VIEWER),
     )
     assert quarantined.status_code == 200
-    assert quarantined.json()["total"] == 1
+    assert quarantined.json()["total"] == 0, "the row is deleted, not held aside"
 
 
 def test_g7_the_queue_adds_no_per_row_query(session, refs, test_engine):
@@ -629,7 +668,13 @@ def test_g7_the_queue_adds_no_per_row_query(session, refs, test_engine):
 
     small = _queue_statements(20)
     large = _queue_statements(60)
-    assert large == small, (
-        f"the queue cost moved from {small} to {large} statements when the rows tripled — "
+    # Amended 15 September 2026. This compared the two counts for equality. A
+    # class no rolling-timetable intake accounts for now raises an entry per
+    # class, so the second, larger file both updates the entries the first one
+    # created and inserts new ones: one more statement *kind*, not one per row.
+    # What the check protects is unchanged - the queue is read once and written
+    # in batches, so the count stays bounded however many rows there are.
+    assert small <= 3 and large <= 3, (
+        f"the queue cost was {small} statements for 20 rows and {large} for 60 - "
         "a per-row query has been introduced"
     )

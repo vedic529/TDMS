@@ -326,8 +326,15 @@ def test_a9_an_unknown_location_is_offered_for_a_suggestion_with_no_exception_pa
     assert stored.location_text == "Nowhere Campus", "found again when the suggestion resolves"
 
 
-def test_a10_a_disagreeing_city_warns_rather_than_refusing(session, refs, admin):
-    """A10 — the city is new data and may simply be missing."""
+def test_a10_a_city_the_dictionary_does_not_hold_is_raised(session, refs, admin):
+    """A10 - amended 15 September 2026.
+
+    It warned and stored nothing. A city the City Dictionary does not hold is now
+    an unmatched value: raised like a campus, the row imports with the city as
+    written, and adding the city to the dictionary closes the entry.
+    """
+    from app.services import reference_suggestion_service as suggestions
+
     review = stage(
         session,
         admin,
@@ -336,10 +343,65 @@ def test_a10_a_disagreeing_city_warns_rather_than_refusing(session, refs, admin)
         [location_row(1, "TI_001_AK", "A K", "Melbourne", "Haymarket")],
     )
     row, messages = issues_for(review, 2)
-    assert row["status"] == "READY", "a disagreement must not block the file"
-    warning = next(message for message in messages if "Melbourne" in message)
-    assert "Sydney" in warning, "the warning names both"
-    assert review["can_apply"] is True
+    assert row["status"] == "NEEDS_CORRECTION"
+    assert any("not in the City Dictionary" in message for message in messages)
+    offered = review["unresolved_values"]
+    assert [(e["entity_type"], e["raw_value"]) for e in offered] == [("CITY", "Melbourne")]
+
+    service.raise_values(session, review["batch_id"], keys=[offered[0]["key"]], user=admin)
+    assert service.read_batch(session, review["batch_id"])["can_apply"] is True
+    service.apply_batch(session, review["batch_id"], apply_mode="MERGE", user=admin)
+    assert session.execute(select(Trainer)).scalars().one().city == "Melbourne"
+
+    entry = session.execute(
+        select(ReferenceSuggestion).where(ReferenceSuggestion.entity_type == "CITY")
+    ).scalars().one()
+    assert entry.attributes == {"campuses": ["Haymarket"]}
+    assert suggestions.unresolved_total(session, "CITY", entry.normalised_value, entry.context) == 1
+
+    session.execute(
+        text("INSERT INTO cities (city_name, state) VALUES ('Melbourne', 'VIC') ON CONFLICT (city_name) DO NOTHING")
+    )
+    assert suggestions.unresolved_total(session, "CITY", entry.normalised_value, entry.context) == 0
+
+
+def test_a10b_a_city_that_disagrees_with_its_campus_is_an_exception(session, refs, admin):
+    """A city the dictionary holds, but not the one the campus is in: a broken
+    rule, accepted for this import only, and never a suggestion (15 September 2026)."""
+    review = stage(
+        session,
+        admin,
+        "LOCATION",
+        LOCATION_COLUMNS,
+        [location_row(1, "TI_001_AK", "A K", "Hobart", "Haymarket")],
+    )
+    row, messages = issues_for(review, 2)
+    assert row["status"] == "NEEDS_CORRECTION"
+    assert any("Hobart" in message and "Sydney" in message for message in messages), "the issue names both"
+    assert review["unresolved_values"] == [], "a broken rule is never a suggestion"
+
+    def decide(**decision):
+        return service.patch_rows(
+            session,
+            review["batch_id"],
+            corrections={},
+            excluded_row_ids=[],
+            exclude_missing_trainers=False,
+            user=admin,
+            **decision,
+        )
+
+    accepted = decide(accepted_exception_row_ids=[row["id"]])
+    assert issues_for(accepted, 2)[0]["status"] == "READY"
+    assert accepted["can_apply"] is True
+
+    withdrawn = decide(withdrawn_exception_row_ids=[row["id"]])
+    assert issues_for(withdrawn, 2)[0]["status"] == "NEEDS_CORRECTION", "Undo puts the decision back"
+
+    decide(accepted_exception_row_ids=[row["id"]])
+    service.apply_batch(session, review["batch_id"], apply_mode="MERGE", user=admin)
+    assert session.execute(select(Trainer)).scalars().one().city == "Hobart"
+    assert session.execute(select(func.count()).select_from(TrainerAvailability)).scalar_one() == 1
 
 
 def test_a11_theory_and_practical_stores_as_the_third_value(session, refs, admin):
@@ -545,16 +607,32 @@ def test_raise_all_takes_every_offered_value_at_once(session, refs, admin, train
     assert after["suggestions_raised"] == 2
 
 
-def test_b6_a_unit_outside_its_qualification_warns(session, refs, admin, trainers_exist):
-    """B6 — the reference data may be incomplete; refusing would block a good file."""
+def test_b6_a_unit_outside_its_qualification_is_raised(session, refs, admin, trainers_exist):
+    """B6 - amended 15 September 2026.
+
+    It warned. A unit its qualification does not list is now the same membership
+    suggestion a rolling timetable raises: offered, raised, and the row imports.
+    """
+    from app.services import reference_suggestion_service as suggestions
+
     review = stage(
         session, admin, "UNITS", UNITS_COLUMNS, [["TI_001_AK", "FNS40222", "BSBPMG533"]]
     )
     row, messages = issues_for(review, 2)
-    assert row["status"] == "READY"
-    warning = next(message for message in messages if "not recorded as part of" in message)
-    assert "BSBPMG533" in warning and "FNS40222" in warning, "the warning names both"
-    assert review["can_apply"] is True
+    assert row["status"] == "NEEDS_CORRECTION"
+    assert any("not listed under FNS40222" in message for message in messages)
+    offered = review["unresolved_values"]
+    assert [(e["entity_type"], e["raw_value"], e["context"]) for e in offered] == [
+        ("UNIT", "BSBPMG533", {"qualification": "FNS40222"})
+    ]
+
+    service.raise_values(session, review["batch_id"], keys=[offered[0]["key"]], user=admin)
+    assert service.read_batch(session, review["batch_id"])["can_apply"] is True
+    service.apply_batch(session, review["batch_id"], apply_mode="MERGE", user=admin)
+    entry = session.execute(
+        select(ReferenceSuggestion).where(ReferenceSuggestion.entity_type == "UNIT")
+    ).scalars().one()
+    assert suggestions.unresolved_total(session, "UNIT", entry.normalised_value, entry.context) >= 1
 
 
 def test_b7_b8_b9_an_unknown_trainer_is_flagged_and_the_rest_still_import(

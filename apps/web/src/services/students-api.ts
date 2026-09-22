@@ -35,7 +35,8 @@ export interface StudentRecord {
   personal_email: string | null;
   primary_phone: string | null;
   remarks: string | null;
-  course_offering_id: number;
+  /** Null while the student is unverified: a reference was raised as a suggestion. */
+  course_offering_id: number | null;
   student_group_id: number | null;
   college: string;
   campus: string;
@@ -46,6 +47,10 @@ export interface StudentRecord {
   group_code: string | null;
   /** The approved Course Duration Option in weeks, when one is set (OD-08). */
   course_duration_option_weeks: number | null;
+  /** Stored with a value that matches no approved record (approved 15 September 2026). */
+  is_unverified: boolean;
+  /** Which of the values that is - shown in red in the side panel. */
+  unverified_fields: Array<'college' | 'campus' | 'qualification'>;
   // DATA-04 soft-delete metadata, present on a deleted record.
   is_deleted: boolean;
   deleted_at?: string | null;
@@ -93,7 +98,7 @@ export interface StudentInput {
 export interface RowIssue {
   field_name: string;
   message: string;
-  /** REFUSE_ROW | BLOCK | BLOCK_DUP | NOTE */
+  /** REFUSE_ROW | BLOCK | BLOCK_DUP | EXCEPTION | ACCEPTED | NOTE */
   issue_status: string;
 }
 
@@ -173,6 +178,18 @@ export interface ImportReview {
   duration_options: Record<string, number[]>;
 }
 
+/** What clearing the student records removed, or would remove. Super Admin only. */
+export interface ClearStudentCounts {
+  students: number;
+  /** Records in the recycle area. They go too: "no deleted record left". */
+  deleted_students: number;
+  intakes: number;
+  import_batches: number;
+  staged_rows: number;
+  /** Open suggestions left with nothing behind them, closed by the clear. */
+  suggestions: number;
+}
+
 export interface ImportApplyResult {
   batch_id: number;
   rows_read: number;
@@ -182,6 +199,8 @@ export interface ImportApplyResult {
   duplicates: number;
   unmatched: number;
   suggestions_raised: number;
+  /** Saved with a raised reference, completed when its suggestion resolves. */
+  unverified?: number;
   intakes_matched: number;
   intakes_tbd: number;
   intakes_not_applicable: number;
@@ -193,13 +212,16 @@ export interface RowPatch {
   row_id: number;
   corrections?: Array<{ column: string; value: string }>;
   exclude?: boolean;
+  /** Accept the row's broken rule for this import (true), or undo that (false). */
+  accept_exception?: boolean;
   /** Resolve a TBD intake by choosing an approved duration. 0 clears the choice. */
   duration_weeks?: number;
   duplicate_decision?: 'KEEP_STORED' | 'KEEP_INCOMING';
   status_value?: string;
   existing_status_value?: string;
   reference_entity?: 'college' | 'campus' | 'qualification';
-  reference_choice?: 'RAISE' | 'EXCEPT' | 'RESOLVE';
+  /** NONE undoes a decision: the row returns to blocking until it is settled again. */
+  reference_choice?: 'RAISE' | 'RESOLVE' | 'NONE';
   reference_resolved_id?: number;
 }
 
@@ -254,7 +276,7 @@ export interface StudentTimetable {
   scope: { college: string; campus: string };
   course_dates: { proposed_start_date: string; proposed_end_date: string };
   /** null when the student has a timetable; otherwise which state applies. */
-  empty_reason: null | 'CREDIT_TRANSFER' | 'NO_ROLLING_TIMETABLE' | 'NO_ROLLING_ROWS';
+  empty_reason: null | 'UNVERIFIED' | 'CREDIT_TRANSFER' | 'NO_ROLLING_TIMETABLE' | 'NO_ROLLING_ROWS';
   summary: {
     units_total: number;
     units_allocated: number;
@@ -303,9 +325,15 @@ export const studentsApi = {
     qualification_id?: number;
     status?: string;
     coe_status?: string;
+    /** Only students with unverified data. */
+    unverified?: boolean;
     limit?: number;
     offset?: number;
-  } = {}) => request<StudentList>(`/students${query(params)}`),
+  } = {}) =>
+    request<StudentList>(
+      // The query string carries text, so the flag is sent only when it is set.
+      `/students${query({ ...params, unverified: params.unverified ? 'true' : undefined })}`,
+    ),
 
   listDeleted: (limit = 50, offset = 0) =>
     request<StudentList>(`/students/deleted${query({ limit, offset })}`),
@@ -348,6 +376,12 @@ export const studentsApi = {
   },
 
   readImport: (batchId: number) => request<ImportReview>(`/students/import/${batchId}`),
+
+  // ------------------------------------------------ clear the student records
+  /** What clearing would remove. Super Admin only. */
+  clearPreview: () => request<ClearStudentCounts>('/students/records/clear-preview'),
+  /** Delete every student record and the import copies. Irreversible. */
+  clearRecords: () => request<ClearStudentCounts>('/students/records', { method: 'DELETE' }),
 
   patchImportRows: (batchId: number, items: RowPatch[]) =>
     request<ImportReview>(`/students/import/${batchId}/rows`, {

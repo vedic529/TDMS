@@ -39,7 +39,7 @@ import { AccountStatusBadge } from '@/components/common/status-badge';
 import { RoleBadge } from '@/components/common/role-badge';
 import { ExportMenu } from '@/components/common/export-menu';
 import { useAuth } from '@/features/auth/auth-context';
-import { getTdmsClient } from '@/services';
+import { administrationApi } from '@/services/administration-api';
 import { INTERFACE_NAMES, SRS_PAGE_REFERENCE } from '@/lib/interface-names';
 import { ROLE_LABELS, ROLE_OPTIONS, canManageTargetUser } from '@/lib/permissions';
 import { OPEN_DECISIONS, OPEN_DECISION_STATUS_LABEL } from '@/lib/open-decisions';
@@ -168,7 +168,7 @@ function OverviewPanel({ onOpenTab }: { onOpenTab: (tab: TabValue) => void }) {
     let cancelled = false;
     void (async () => {
       try {
-        const result = await getTdmsClient().getDashboardOverview();
+        const result = await administrationApi.getDashboardOverview();
         if (!cancelled) setOverview(result);
       } finally {
         if (!cancelled) setLoading(false);
@@ -245,7 +245,7 @@ function AccessRequestsPanel() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setRequests(await getTdmsClient().listAccessRequests());
+      setRequests(await administrationApi.listAccessRequests());
     } finally {
       setLoading(false);
     }
@@ -263,11 +263,10 @@ function AccessRequestsPanel() {
     const { request, decision } = confirming;
     setBusy(true);
     try {
-      const client = getTdmsClient();
       const updated =
         decision === 'approve'
-          ? await client.approveAccessRequest(request.id, { actor })
-          : await client.denyAccessRequest(request.id, { actor });
+          ? await administrationApi.approveAccessRequest(request.id)
+          : await administrationApi.denyAccessRequest(request.id);
       setConfirming(null);
       await load();
       toast.success(
@@ -488,7 +487,7 @@ function UserManagementPanel() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setUsers(await getTdmsClient().listUsers());
+      setUsers(await administrationApi.listUsers());
     } finally {
       setLoading(false);
     }
@@ -704,10 +703,9 @@ function RoleChangeDialog({
     if (!actor || !target) return;
     setBusy(true);
     try {
-      const client = getTdmsClient();
-      if (roleChanged) await client.changeUserRole(target.id, role as TdmsRole, { actor });
+      if (roleChanged) await administrationApi.changeUserRole(target.id, role as TdmsRole);
       if (statusChanged) {
-        await client.changeUserAccountStatus(target.id, status as AccountStatus, { actor });
+        await administrationApi.changeUserAccountStatus(target.id, status as AccountStatus);
       }
       await onSaved();
       setConfirming(false);
@@ -841,8 +839,17 @@ const ACTION_OPTIONS = [
   'Import',
   'Export',
   'Timetable save',
+  'Timetable generation',
+  'Cancellation after update',
   'Override',
   'Access denied',
+  'Access request submitted',
+  'Access request approved',
+  'Access request denied',
+  'Access request cancelled',
+  'Role changed',
+  'Account status changed',
+  'User provisioned',
 ];
 
 function ActivityRecordsPanel() {
@@ -854,7 +861,7 @@ function ActivityRecordsPanel() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setRows(await getTdmsClient().listActivityRecords(filters));
+      setRows(await administrationApi.listActivityRecords(filters));
     } finally {
       setLoading(false);
     }

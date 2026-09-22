@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ChevronDown, GraduationCap, MapPin, Plus, Loader2 } from 'lucide-react';
+import { CalendarDays, ChevronDown, GraduationCap, MapPin, Plus, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -25,6 +25,7 @@ import {
 import { trainersApi, type TrainerDetail, type TrainerLocation } from '@/services/trainers-api';
 import { referenceApi } from '@/services/reference-api';
 import { cn } from '@/lib/utils';
+import { TrainerTimetableDialog } from './trainer-timetable-dialog';
 
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] as const;
 
@@ -87,6 +88,7 @@ export function TrainerDetailPanel({
   const [error, setError] = React.useState<string | null>(null);
   const [addingLocation, setAddingLocation] = React.useState(false);
   const [addingUnits, setAddingUnits] = React.useState(false);
+  const [timetableOpen, setTimetableOpen] = React.useState(false);
 
   const load = React.useCallback(async () => {
     if (trainerPk === null) return;
@@ -134,6 +136,17 @@ export function TrainerDetailPanel({
           <SheetDescription>
             {detail ? `${detail.trainer_name} · ${detail.city ?? 'City not recorded'}` : 'Loading…'}
           </SheetDescription>
+          {detail && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2 w-fit"
+              onClick={() => setTimetableOpen(true)}
+            >
+              <CalendarDays className="size-4" aria-hidden="true" />
+              Show timetable
+            </Button>
+          )}
         </SheetHeader>
 
         <SheetBody className="space-y-6">
@@ -251,6 +264,13 @@ export function TrainerDetailPanel({
           ) : null}
         </SheetBody>
       </SheetContent>
+      {detail && (
+        <TrainerTimetableDialog
+          trainer={detail}
+          open={timetableOpen}
+          onOpenChange={setTimetableOpen}
+        />
+      )}
     </Sheet>
   );
 }

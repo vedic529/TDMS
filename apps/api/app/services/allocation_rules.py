@@ -26,8 +26,12 @@ MSCRIS_CLASS_LENGTH = dt.timedelta(hours=5)
 
 VIRTUAL_CLASSROOM_LABELS = {
     "FACE TO FACE VC": "FACE_TO_FACE_VC",
-    "FACE TO FACE VIRTUAL": "FACE_TO_FACE_VIRTUAL",
+    # Source workbooks use both spellings for the same virtual classroom.
+    # Accept both, but normalise them before anything is stored.
+    "FACE TO FACE VIRTUAL": "FACE_TO_FACE_VC",
 }
+
+CANONICAL_VIRTUAL_CLASSROOM = "Face to Face VC"
 
 WEEKDAY_NAMES = {
     "MONDAY": "MONDAY",
@@ -71,6 +75,11 @@ def stream_may_be_virtual(stream: str) -> bool:
 def virtual_kind_for(label: str) -> str | None:
     compact = " ".join(label.upper().split())
     return VIRTUAL_CLASSROOM_LABELS.get(compact)
+
+
+def canonical_classroom(label: str) -> str:
+    """Return the one approved label for either accepted virtual spelling."""
+    return CANONICAL_VIRTUAL_CLASSROOM if virtual_kind_for(label) else label.strip()
 
 
 def class_length(start: dt.time, end: dt.time) -> dt.timedelta:

@@ -126,6 +126,8 @@ def resolve_suggestion(
             action=payload.action,
             resolved_entity_id=payload.resolved_entity_id,
             create_values=payload.create_values,
+            reason_code=payload.reason_code,
+            reason_detail=payload.reason_detail,
         )
         session.commit()
     except AllocationImportError as exc:

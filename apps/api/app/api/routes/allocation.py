@@ -27,9 +27,13 @@ from app.schemas.allocation import (
     DeliveryListItem,
     ImportApplyRead,
     ImportReviewRead,
+    MscrisGroupPatch,
+    MscrisGroupRead,
     SessionAdd,
     SessionPatch,
     SessionRead,
+    SpreadsheetChoicesRead,
+    SpreadsheetListRead,
 )
 from app.services import allocation_calendar as calendar_service
 from app.services import allocation_edit as edit_service
@@ -37,6 +41,7 @@ from app.services import allocation_export as export_service
 from app.services import allocation_import as import_service
 from app.services import allocation_maintenance as maintenance_service
 from app.services import allocation_profiles as profiles
+from app.services import allocation_spreadsheet as spreadsheet_service
 
 router = APIRouter(prefix="/allocation", tags=["allocation records"])
 READ_RESPONSES = {403: {"description": "Requires an active TDMS account."}}
@@ -79,6 +84,57 @@ def read_calendar(
             session, training_package=training_package, start_date=start_date, end_date=end_date
         )
     )
+
+
+@router.get("/spreadsheet", response_model=SpreadsheetListRead, responses=READ_RESPONSES)
+def read_spreadsheet(
+    training_package: str = Query(...),
+    start_date: dt.date = Query(...),
+    end_date: dt.date | None = Query(default=None),
+    limit: int = Query(default=5000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    return SpreadsheetListRead.model_validate(
+        spreadsheet_service.list_rows(
+            session,
+            training_package=training_package,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@router.get("/spreadsheet/{delivery_id}/choices", response_model=SpreadsheetChoicesRead, responses=READ_RESPONSES)
+def spreadsheet_choices(
+    delivery_id: int,
+    training_package: str = Query(...),
+    stream: str = Query(...),
+    weekday: str = Query(...),
+    start_time: str = Query(...),
+    end_time: str = Query(...),
+    delivery_mode: str = Query(...),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    try:
+        return SpreadsheetChoicesRead.model_validate(
+            spreadsheet_service.choices(
+                session,
+                delivery_id=delivery_id,
+                training_package=training_package,
+                stream=stream.upper(),
+                weekday=weekday.upper(),
+                start_time=_time(start_time),
+                end_time=_time(end_time),
+                delivery_mode=delivery_mode.upper(),
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/deliveries", response_model=DeliveryList, responses=READ_RESPONSES)
@@ -214,6 +270,8 @@ def patch_session(
             end_time=_time(payload.end_time),
             classroom=payload.classroom,
             trainer=payload.trainer,
+            facility_id=payload.facility_id,
+            trainer_id=payload.trainer_id,
         )
         session.commit()
     except edit_service.AllocationEditError as exc:
@@ -223,6 +281,35 @@ def patch_session(
         session.rollback()
         raise
     return SessionRead.model_validate(row)
+
+
+@router.patch("/mscris-groups", response_model=MscrisGroupRead, responses=WRITE_RESPONSES)
+def patch_mscris_group(
+    payload: MscrisGroupPatch,
+    training_package: str = Query(...),
+    actor: User = Depends(require_maintain_timetable),
+    session: Session = Depends(get_db),
+):
+    """Edit a merged MSCRIS calendar entry: every class day it covers changes together."""
+    try:
+        updated = edit_service.update_mscris_group(
+            session,
+            actor,
+            session_ids=payload.session_ids,
+            training_package=training_package,
+            start_time=_time(payload.start_time),
+            end_time=_time(payload.end_time),
+            classroom=payload.classroom,
+            trainer=payload.trainer,
+        )
+        session.commit()
+    except edit_service.AllocationEditError as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return MscrisGroupRead(updated=updated)
 
 
 @router.post("/sessions", response_model=SessionRead, status_code=status.HTTP_201_CREATED, responses=WRITE_RESPONSES)
@@ -277,16 +364,38 @@ def delete_session(
 def export_allocations(
     training_package: str = Query(...),
     start_date: dt.date = Query(...),
-    end_date: dt.date = Query(...),
+    end_date: dt.date | None = Query(default=None),
+    file_format: str = Query(default="xlsx", alias="format", pattern="^(xlsx|csv)$"),
+    layout: str = Query(
+        default="spreadsheet",
+        pattern="^(spreadsheet|source)$",
+        description="spreadsheet: the Allocation Records view as shown. source: the uploaded file's own columns.",
+    ),
     _: User = Depends(require_viewer_or_above),
     session: Session = Depends(get_db),
 ):
-    name, payload = export_service.export_workbook(
-        session, training_package=training_package, start_date=start_date, end_date=end_date
-    )
+    """Download the allocation records.
+
+    The default is the spreadsheet view exactly as the screen shows it
+    (21 September 2026); `layout=source` still rebuilds the uploaded workbook's
+    own column order for a re-import.
+    """
+    if layout == "source":
+        name, payload = export_service.export_workbook(
+            session, training_package=training_package, start_date=start_date, end_date=end_date
+        )
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        name, payload, media_type = export_service.export_spreadsheet(
+            session,
+            training_package=training_package,
+            start_date=start_date,
+            end_date=end_date,
+            file_format=file_format,
+        )
     return Response(
         content=payload,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
 

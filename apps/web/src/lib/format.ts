@@ -80,6 +80,28 @@ export function today(): IsoDate {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * Today on the viewer's own calendar. `today()` reads the UTC date, which in
+ * Australia is still yesterday until mid-morning.
+ */
+export function localToday(): IsoDate {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/** The Monday of the week a date falls in. */
+export function startOfWeek(value: IsoDate): IsoDate {
+  const weekday = new Date(`${value}T00:00:00Z`).getUTCDay(); // 0 = Sunday
+  return addDays(value, weekday === 0 ? -6 : 1 - weekday);
+}
+
+/** The Sunday of the week a date falls in. */
+export function endOfWeek(value: IsoDate): IsoDate {
+  return addDays(startOfWeek(value), 6);
+}
+
 export function nowIso(): IsoDateTime {
   return new Date().toISOString();
 }

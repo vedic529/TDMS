@@ -42,6 +42,26 @@ class College(Base):
     campus_links: Mapped[list[CollegeCampus]] = relationship(back_populates="college")
 
 
+class City(Base):
+    """An approved city - the City Dictionary (approved 15 September 2026).
+
+    Separate from `campuses` so a city is recorded once and every campus in it
+    points at the same spelling. `campuses.city` references `city_name`, so a
+    campus cannot name a city the dictionary does not hold, and a rename carries
+    through to the campuses by ON UPDATE CASCADE.
+    """
+
+    __tablename__ = "cities"
+    __table_args__ = (UniqueConstraint("city_name", name="uq_cities_city_name"),)
+
+    id: Mapped[int] = pk_column()
+    city_name: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    campuses: Mapped[list[Campus]] = relationship(back_populates="city_record")
+
+
 class Campus(Base):
     """A physical delivery site.
 
@@ -70,11 +90,18 @@ class Campus(Base):
     #
     # `campus_location` is **not** repurposed for the city: the allocation
     # importer's `campus_by_location` lookup and the export both read it.
-    city: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #
+    # Since 15 September 2026 the city must be one the City Dictionary holds.
+    city: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey("cities.city_name", onupdate="CASCADE", ondelete="RESTRICT"),
+        nullable=True,
+    )
     approved_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
     college_links: Mapped[list[CollegeCampus]] = relationship(back_populates="campus")
+    city_record: Mapped[City | None] = relationship(back_populates="campuses")
     source_addresses: Mapped[list[CampusSourceAddress]] = relationship(
         back_populates="campus", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -133,6 +160,10 @@ class CollegeCampus(Base):
     campus_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("campuses.id", ondelete="RESTRICT"), primary_key=True
     )
+    # The Campus Address Dictionary (approved 16 September 2026): the full address
+    # is identified by college + campus, because one campus name can be a
+    # different building for each college (Haymarket, Melbourne).
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Retire a combination without deleting it (DATA-03).
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 

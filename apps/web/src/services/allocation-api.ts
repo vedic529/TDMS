@@ -16,9 +16,16 @@ export interface AllocationDiscrepancy {
   value: string | null;
   message: string;
   issue_id: string;
+  /**
+   * What the issue offers, decided by its kind: SUGGESTION is raised, EXCEPTION
+   * is accepted for this import, UNSTORABLE is edited or its row excluded, and
+   * EXCLUDED is a row the reviewer took out.
+   */
+  category: 'SUGGESTION' | 'EXCEPTION' | 'UNSTORABLE' | 'EXCLUDED';
   can_edit: boolean;
   can_raise_suggestion: boolean;
   can_except: boolean;
+  can_exclude: boolean;
   edit_fields?: Array<{ column: string; value: string }>;
 }
 
@@ -27,6 +34,8 @@ export interface AllocationImportOverrides {
   except_ids: string[];
   raise_ids: string[];
   no_raise_ids: string[];
+  /** Source rows taken out of the import. */
+  exclude_rows: number[];
 }
 
 export interface AllocationImportReview {
@@ -47,6 +56,21 @@ export interface AllocationImportReview {
   can_apply: boolean;
   raise_suggestions?: boolean;
   existing_deliveries?: number;
+  exceptions_accepted?: number;
+  rows_excluded?: number;
+}
+
+/** One unit's class day inside a merged MSCRIS entry. */
+export interface AllocationCoveredClass {
+  session_id: number;
+  delivery_id: number;
+  unit_code: string;
+  unit_title: string;
+  qualification_code: string;
+  college: string;
+  campus: string;
+  intakes: string[];
+  student_count: number;
 }
 
 export interface AllocationCalendarSession {
@@ -59,6 +83,12 @@ export interface AllocationCalendarSession {
   unit_code: string;
   unit_title: string;
   qualification_code: string;
+  college: string;
+  campus: string;
+  duration_weeks: number | null;
+  /** The delivery's dates: one stored row is one unit's delivery. */
+  unit_start_date: string;
+  unit_end_date: string;
   classroom: string;
   trainer: string;
   delivery_mode: string;
@@ -67,14 +97,27 @@ export interface AllocationCalendarSession {
   intake_match_status: string;
   needs_allocation: boolean;
   not_found: boolean;
+  /** Active students whose college, campus, qualification and intake are this class's. */
+  student_count: number;
+  /** Every stored class day this entry stands for. One, or each class day of a merged MSCRIS entry. */
+  session_ids: number[];
+  /**
+   * The units a merged MSCRIS entry covers (approved 17 September 2026): MSCRIS
+   * class days with the same time, classroom and trainer are one class. Empty for
+   * any other entry.
+   */
+  covered: AllocationCoveredClass[];
 }
 
 export interface AllocationCalendarDay {
   date: string;
   weekday: string;
   sessions: AllocationCalendarSession[];
-  expected_units: Array<{ unit_code: string; intake_label: string; scheduled: boolean }>;
-  student_count: number | null;
+  /** Unique units with a Theory or Practical class this day. MSCRIS is not counted. */
+  allocated_unit_count: number;
+  /** Units the rolling timetable schedules this week that no class teaches yet. The same on every day of the week. */
+  expected_unit_count: number;
+  expected_units: Array<{ unit_code: string; qualification_codes: string[]; intake_labels: string[] }>;
 }
 
 export interface AllocationCalendar {
@@ -84,6 +127,54 @@ export interface AllocationCalendar {
   days: AllocationCalendarDay[];
   query_cost: number;
   empty: boolean;
+}
+
+export interface AllocationSpreadsheetSession {
+  session_id: number;
+  stream: 'THEORY' | 'PRACTICAL';
+  weekday: string;
+  start_time: string;
+  end_time: string;
+  delivery_mode: 'PHYSICAL' | 'VIRTUAL';
+  facility_id: number | null;
+  classroom: string;
+  classroom_capacity: number | null;
+  trainer: string;
+  trainer_id: number | null;
+}
+
+export interface AllocationSpreadsheetRow {
+  sl_no: number;
+  delivery_id: number;
+  college: string;
+  campus: string;
+  qualification_code: string;
+  qualification_title: string;
+  duration_weeks: number;
+  group: string;
+  intakes: string[];
+  total_students: number;
+  coe_students: number;
+  non_coe_students: number;
+  unit_code: string;
+  unit_title: string;
+  unit_start_date: string;
+  unit_end_date: string;
+  uoc_type: string;
+  mode_of_delivery: string;
+  sessions: AllocationSpreadsheetSession[];
+}
+
+export interface AllocationSpreadsheetList {
+  items: AllocationSpreadsheetRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AllocationSpreadsheetChoices {
+  classrooms: Array<{ id: number | null; name: string; capacity: number | null }>;
+  trainers: Array<{ id: number; name: string }>;
 }
 
 
@@ -139,6 +230,24 @@ export const allocationApi = {
     request<AllocationCalendar>(
       `/allocation/calendar?training_package=${encodeURIComponent(trainingPackage)}&start_date=${startDate}&end_date=${endDate}`,
     ),
+  spreadsheet: (trainingPackage: string, startDate: string, endDate: string, limit: number, offset: number) =>
+    request<AllocationSpreadsheetList>(
+      `/allocation/spreadsheet?${new URLSearchParams({
+        training_package: trainingPackage,
+        start_date: startDate,
+        ...(endDate ? { end_date: endDate } : {}),
+        limit: String(limit),
+        offset: String(offset),
+      }).toString()}`,
+    ),
+  spreadsheetChoices: (
+    deliveryId: number,
+    trainingPackage: string,
+    values: { stream: string; weekday: string; start_time: string; end_time: string; delivery_mode: string },
+  ) => {
+    const params = new URLSearchParams({ training_package: trainingPackage, ...values });
+    return request<AllocationSpreadsheetChoices>(`/allocation/spreadsheet/${deliveryId}/choices?${params}`);
+  },
   validateImport: (
     trainingPackage: string,
     file: File,
@@ -149,7 +258,7 @@ export const allocationApi = {
     data.set('training_package', trainingPackage);
     data.set('file', file);
     data.set('raise_suggestions', raiseSuggestions ? 'true' : 'false');
-    data.set('overrides', JSON.stringify(overrides ?? { corrections: [], except_ids: [], raise_ids: [], no_raise_ids: [] }));
+    data.set('overrides', JSON.stringify(overrides ?? { corrections: [], except_ids: [], raise_ids: [], no_raise_ids: [], exclude_rows: [] }));
     return request<AllocationImportReview>('/allocation/import/validate', { method: 'POST', body: data });
   },
   applyImport: (
@@ -164,7 +273,7 @@ export const allocationApi = {
     data.set('file', file);
     data.set('apply_mode', applyMode);
     data.set('raise_suggestions', raiseSuggestions ? 'true' : 'false');
-    data.set('overrides', JSON.stringify(overrides ?? { corrections: [], except_ids: [], raise_ids: [], no_raise_ids: [] }));
+    data.set('overrides', JSON.stringify(overrides ?? { corrections: [], except_ids: [], raise_ids: [], no_raise_ids: [], exclude_rows: [] }));
     return request<{ deliveries_written: number; sessions_written: number }>('/allocation/import/apply', {
       method: 'POST',
       body: data,
@@ -173,22 +282,69 @@ export const allocationApi = {
   updateSession: (
     sessionId: number,
     trainingPackage: string,
-    payload: { weekday: string; start_time: string; end_time: string; classroom?: string; trainer?: string },
+    payload: { weekday: string; start_time: string; end_time: string; classroom?: string; trainer?: string; facility_id?: number; trainer_id?: number },
   ) =>
     request(`/allocation/sessions/${sessionId}?training_package=${encodeURIComponent(trainingPackage)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
-  download: async (trainingPackage: string, startDate: string, endDate: string) => {
+  addSession: (
+    trainingPackage: string,
+    payload: {
+      delivery_id: number;
+      stream: string;
+      weekday: string;
+      start_time: string;
+      end_time: string;
+      classroom?: string;
+      trainer?: string;
+    },
+  ) =>
+    request(`/allocation/sessions?training_package=${encodeURIComponent(trainingPackage)}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteSession: (sessionId: number, trainingPackage: string) =>
+    request<void>(`/allocation/sessions/${sessionId}?training_package=${encodeURIComponent(trainingPackage)}`, {
+      method: 'DELETE',
+    }),
+  /** Edit a merged MSCRIS entry: every class day it covers changes together. */
+  updateMscrisGroup: (
+    trainingPackage: string,
+    payload: { session_ids: number[]; start_time: string; end_time: string; classroom?: string; trainer?: string },
+  ) =>
+    request<{ updated: number }>(
+      `/allocation/mscris-groups?training_package=${encodeURIComponent(trainingPackage)}`,
+      { method: 'PATCH', body: JSON.stringify(payload) },
+    ),
+  /**
+   * The allocation records as the spreadsheet view shows them: same columns,
+   * same order, same wording (21 September 2026). Returns the file and the name
+   * the API chose, so the download is named the same way everywhere.
+   */
+  download: async (
+    trainingPackage: string,
+    startDate: string,
+    endDate: string,
+    fileFormat: 'xlsx' | 'csv' = 'xlsx',
+  ): Promise<{ blob: Blob; fileName: string }> => {
     const token = await getAuthProvider().getApiAccessToken();
     const headers = new Headers();
     if (token) headers.set('Authorization', `Bearer ${token}`);
-    const response = await fetch(
-      `${env.apiUrl}/allocation/export?training_package=${encodeURIComponent(trainingPackage)}&start_date=${startDate}&end_date=${endDate}`,
-      { headers },
-    );
-    if (!response.ok) throw new ReferenceApiError(response.status, 'The workbook could not be downloaded.');
-    return response.blob();
+    const params = new URLSearchParams({
+      training_package: trainingPackage,
+      start_date: startDate,
+      format: fileFormat,
+    });
+    if (endDate) params.set('end_date', endDate);
+    const response = await fetch(`${env.apiUrl}/allocation/export?${params.toString()}`, { headers });
+    if (!response.ok) throw new ReferenceApiError(response.status, 'The file could not be downloaded.');
+    const disposition = response.headers.get('Content-Disposition') ?? '';
+    const named = /filename="?([^";]+)"?/.exec(disposition);
+    return {
+      blob: await response.blob(),
+      fileName: named?.[1] ?? `allocation-records-${trainingPackage}.${fileFormat}`,
+    };
   },
 };
 

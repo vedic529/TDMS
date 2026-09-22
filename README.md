@@ -4,14 +4,10 @@ Internal web application for viewing and managing timetable information and the
 approved student, trainer, college, course and unit data needed to create
 reliable timetables.
 
-This repository currently contains a **complete, interactive frontend
-prototype** built against the TDMS Software Requirements Specification (SRS)
-Version 1.1, plus a minimal FastAPI skeleton so the backend can be added later
-without restructuring the project.
-
-> **Demo data only.** No production student, trainer or timetable information is
-> stored in this repository. Prototype changes are held in browser storage under
-> keys prefixed `tdms.prototype.v1` and are never production data (DATA-06).
+This repository contains a Next.js frontend and FastAPI backend built against
+the TDMS Software Requirements Specification (SRS) Version 1.1. Operational
+records are read from and written to PostgreSQL through the API. Local
+development uses PostgreSQL in Docker; the planned hosted database is Supabase.
 
 ---
 
@@ -79,7 +75,6 @@ Set these values. Leave every other line as it is in the example.
 
 | Variable | Value |
 | --- | --- |
-| `NEXT_PUBLIC_TDMS_AUTH_MODE` | `entra` |
 | `NEXT_PUBLIC_ENTRA_CLIENT_ID` | From the project owner |
 | `NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS` | From the project owner |
 | `NEXT_PUBLIC_ENTRA_API_SCOPE` | From the project owner |
@@ -190,6 +185,7 @@ cd apps/api
 .venv\Scripts\python scripts/import_trainers.py --apply
 .venv\Scripts\python scripts/import_rolling_timetable.py --package BSB --file "../../data/source/Rolling TT Data.csv" --apply --proceed-matching
 .venv\Scripts\python scripts/import_reference_data.py --apply
+.venv\Scripts\python scripts/apply_campus_address_dictionary.py --apply
 cd ../..
 ```
 
@@ -199,8 +195,29 @@ Why the order matters:
   so reference data comes first.
 - The reference import runs a second time so it can take unit sequences from
   the rolling timetable that has now been loaded.
+- The Campus Address Dictionary runs **last**. It corrects addresses the imports
+  read from the source files and merges South Melbourne into Melbourne, so
+  running `import_reference_data.py` again afterwards undoes part of it; run the
+  dictionary script again if you do.
 
 Every script is safe to run again; it does not duplicate rows.
+
+#### Campus Address Dictionary
+
+A full address is identified by **college + campus**, not by the campus alone:
+Haymarket is 8 Quay St for REACH and NPA but 841 George St for AIBT and BIC.
+Each approved college/campus combination keeps its own address
+(`college_campuses.address`).
+
+- **To view, edit or add an address:** in the website, open **College and
+  Course Reference Data → College Locations → Address Dictionary**. Adding an
+  address for a college and campus that are not yet linked also approves that
+  combination. An address already recorded for a different campus is refused.
+- **To change what a fresh database is seeded with:** edit `DICTIONARY` in
+  [`apps/api/scripts/apply_campus_address_dictionary.py`](apps/api/scripts/apply_campus_address_dictionary.py).
+  The address corrections decided on 16 September 2026 (420 Collins St,
+  132-146 Elizabeth Street, Brisbane Levels 2-3, South Melbourne written as
+  Melbourne) are listed in the same file.
 
 Students and allocation timetables are not loaded here. Load them in the website
 (**Student Data → Bulk Student Import**, and the timetable import). Keep student
@@ -391,9 +408,8 @@ tdms/
 │   │   │   │   └── common/        # TopNavigation, DataTable, dialogs, states…
 │   │   │   ├── features/          # one folder per work area
 │   │   │   ├── lib/               # permissions, env, formatting, export, rules
-│   │   │   ├── services/          # TdmsClient + Mock/Api implementations, auth
+│   │   │   ├── services/          # database-backed API clients and authentication
 │   │   │   ├── types/             # SRS data types
-│   │   │   └── mock-data/         # seeded demo dataset
 │   │   ├── tests/
 │   │   ├── public/
 │   │   ├── package.json
@@ -531,12 +547,10 @@ cp apps/api/.env.example apps/api/.env
 | `NEXT_PUBLIC_APP_NAME` | Display name |
 | `NEXT_PUBLIC_APP_ENV` | `development` \| `staging` \| `production` |
 | `NEXT_PUBLIC_API_URL` | Base URL of the TDMS API |
-| `NEXT_PUBLIC_TDMS_DATA_MODE` | `mock` → `MockTdmsClient`, `api` → `ApiTdmsClient` |
-| `NEXT_PUBLIC_TDMS_AUTH_MODE` | `mock` → `MockAuthProvider`, `entra` → `MicrosoftEntraAuthProvider` |
 | `NEXT_PUBLIC_ENTRA_CLIENT_ID` | Supplied after OD-01 is approved |
-| `NEXT_PUBLIC_ENTRA_TENANT_ID` | Supplied after OD-01 is approved |
+| `NEXT_PUBLIC_ENTRA_ALLOWED_TENANT_IDS` | Comma-separated approved tenant IDs |
+| `NEXT_PUBLIC_ENTRA_API_SCOPE` | Delegated scope for the TDMS API |
 | `NEXT_PUBLIC_ENTRA_REDIRECT_URI` | Approved redirect address |
-| `NEXT_PUBLIC_TDMS_DEV_TOOLS` | Development access preview; must be `false` outside development |
 
 **Backend (`apps/api/.env`)**
 
@@ -552,7 +566,7 @@ cp apps/api/.env.example apps/api/.env
 
 ---
 
-## 11. Mock authentication
+## 11. Authentication
 
 TDMS offers exactly one authentication action:
 
@@ -564,71 +578,25 @@ There is no email/password form, no "forgot password" and no social sign-in.
 The application never asks for, receives or stores a Microsoft password
 (AUTH-03).
 
-Authentication goes through an adapter:
-
-```
-AuthProvider
-   ├── MockAuthProvider               (development, no Microsoft call)
-   └── MicrosoftEntraAuthProvider     (production, MSAL — wired after OD-01)
-```
-
-While `NEXT_PUBLIC_ENTRA_CLIENT_ID` / `NEXT_PUBLIC_ENTRA_TENANT_ID` are empty,
-`env.authMode` falls back to `mock`, the same button creates a demo session, and
-the sign-in screen states that the tenant is not configured.
+Authentication uses Microsoft Entra ID through MSAL. If the Entra client,
+tenant allow-list or API scope is missing, the sign-in screen reports the
+configuration problem and does not create a local browser identity.
 
 The Microsoft sign-in result and the TDMS access decision are stored separately
 (SRS 4.2). An account with status `INACTIVE` or `DISABLED` is denied even after a
-successful sign-in (AUTH-05) — the seeded users include one of each so this can
-be demonstrated.
+successful sign-in (AUTH-05).
 
 After a granted sign-in the user lands on **Timetable View and Management**
 (AUTH-07).
 
 ---
 
-## 12. Development role simulation
+## 12. Data source
 
-Because Microsoft Entra ID is not connected, a **development-only** access
-preview is available. It is *not* a production authentication mechanism and does
-not appear in the normal interface.
-
-- Enabled only when `NEXT_PUBLIC_APP_ENV=development`, `NEXT_PUBLIC_TDMS_AUTH_MODE=mock`
-  **and** `NEXT_PUBLIC_TDMS_DEV_TOOLS=true`. It disappears the moment real
-  Microsoft sign-in is switched on.
-- Opened from a discreet **Dev tools** button in the bottom-right corner.
-- Lets you preview all four access levels — Viewer · Data Editor · Admin ·
-  Super Admin — plus the Inactive and Disabled account states.
-- Also offers **Reset demo data**, which restores the seeded dataset.
-
-Users can never choose their own role in the application itself. The role badge
-in the account area is display-only.
-
----
-
-## 13. Mock data
-
-The seeded dataset lives in `apps/web/src/mock-data/` and covers colleges,
-campuses, qualification offerings, qualification/unit sequences, courses,
-facilities, trainers, students, timetable sessions, TDMS users and user activity
-records. Values follow the codes visible in the existing TDMS prototype
-(AIBT Global, BSB/SIT/CHC/AUR/FBP qualifications) so the interface can be
-reviewed against familiar data.
-
-Mock data is **never imported by a UI component**. Pages read through
-`TdmsClient`:
-
-```
-UI components
-      │
-      ▼
-TdmsClient (interface)
-      ├── MockTdmsClient   (prototype dataset in browser storage)
-      └── ApiTdmsClient    (future FastAPI service)
-```
-
-Demo changes persist across a page refresh in `localStorage` under
-`tdms.prototype.v1.*`. Only the service layer touches that storage, so removing
-it later changes nothing in the pages.
+All operational tabs use FastAPI endpoints backed by PostgreSQL. College and
+course source files were imported into the backend; the current College
+Reference interface allows single-record entry. Student, trainer, rolling
+timetable and allocation workflows retain their supported bulk imports.
 
 ---
 
@@ -889,23 +857,12 @@ configuration must fail loudly, not quietly admit everyone.
 What IT still needs to supply, and what each value does:
 [`docs/auth/microsoft-entra-setup.md`](docs/auth/microsoft-entra-setup.md).
 
-### Remaining work
+## 21. Supabase migration
 
-Add `@azure/msal-browser` and complete
-`apps/web/src/services/auth/entra-auth-provider.ts`. That file documents exactly
-where `loginRedirect`, `acquireTokenSilent` and `logoutRedirect` connect; the
-token handoff to `GET /me` is already written. No page component changes:
-everything goes through `getAuthProvider()`.
-
-## 21. Future FastAPI, Supabase and PostgreSQL integration
-
-1. Approve the schema (DATA-07 / OD-13) and add migrations under `database/`.
-2. Implement the routers listed in `apps/api/app/api/`. The paths are already
-   fixed by `apps/web/src/services/api-tdms-client.ts`.
-3. Set `DATABASE_URL` in the API environment — never in the frontend.
-4. Set `NEXT_PUBLIC_TDMS_DATA_MODE=api` and `NEXT_PUBLIC_API_URL`.
-
-No page component changes: everything goes through `getTdmsClient()`.
+The API already uses PostgreSQL through `DATABASE_URL`. Moving from the local
+Docker database to Supabase requires applying the existing migrations and
+changing the backend database connection. The frontend continues to call the
+same API and never receives database credentials.
 
 ## 22. Future deployment architecture
 

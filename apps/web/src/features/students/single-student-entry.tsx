@@ -43,7 +43,7 @@ import { INTERFACE_NAMES } from '@/lib/interface-names';
 import { readOnlyReason } from '@/lib/permissions';
 import { formatDate, nowIso } from '@/lib/format';
 import { deriveActualCourseDuration, deriveCollegeEmail, deriveState } from '@/lib/student-rules';
-import { COUNTRY_OPTIONS } from '@/mock-data';
+import { COUNTRY_OPTIONS } from '@/lib/reference-options';
 import { COE_OPTIONS, YES_NO_OPTIONS, studentFormSchema, type StudentFormValues } from './student-fields';
 import type { ValidationIssue, ValidationResult, ReasonCode } from '@/types/common';
 

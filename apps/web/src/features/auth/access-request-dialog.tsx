@@ -19,7 +19,7 @@ import { RoleBadge } from '@/components/common/role-badge';
 import { useAuth } from '@/features/auth/auth-context';
 import { ROLE_DESCRIPTIONS, ROLE_LABELS, requestableRolesFor } from '@/lib/permissions';
 import { formatDateTime } from '@/lib/format';
-import { getTdmsClient } from '@/services';
+import { administrationApi } from '@/services/administration-api';
 import type { AccessRequest, RequestableRole } from '@/types/auth';
 
 /**
@@ -47,7 +47,7 @@ export function AccessRequestDialog({
     if (!user) return;
     setLoading(true);
     try {
-      setPending(await getTdmsClient().getMyAccessRequest(user.id));
+      setPending(await administrationApi.getMyAccessRequest());
     } finally {
       setLoading(false);
     }
@@ -65,7 +65,7 @@ export function AccessRequestDialog({
     if (!user) return;
     setBusy(true);
     try {
-      const { notification } = await getTdmsClient().submitAccessRequest(role, { actor: user });
+      const { notification } = await administrationApi.submitAccessRequest(role);
       await load();
       setConfirming(null);
       toast.success(`${ROLE_LABELS[role]} access requested`, {
@@ -86,7 +86,7 @@ export function AccessRequestDialog({
     if (!user || !pending) return;
     setBusy(true);
     try {
-      await getTdmsClient().cancelAccessRequest(pending.id, { actor: user });
+      await administrationApi.cancelAccessRequest(pending.id);
       await load();
       await refreshSession();
       toast.success('Access request cancelled');

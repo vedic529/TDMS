@@ -593,3 +593,101 @@ class LocationCityRead(BaseModel):
 class LocationStateRead(BaseModel):
     state: str
     cities: list[LocationCityRead] = []
+
+
+# ---------------------------------------------------------------------------
+# The City Dictionary (approved 15 September 2026)
+# ---------------------------------------------------------------------------
+
+
+class CityCampusRead(BaseModel):
+    id: int
+    campus_code: str
+    campus_name: str
+    state: str
+
+
+class CityRead(BaseModel):
+    id: int
+    city_name: str
+    state: str
+    is_active: bool
+    campuses: list[CityCampusRead] = []
+
+
+class CityWrite(BaseModel):
+    city_name: str
+    state: str
+    #: The campuses located in this city. Each must be in the city's state.
+    campus_ids: list[int] = []
+
+
+# ---------------------------------------------------------------------------
+# The Campus Address Dictionary (approved 16 September 2026)
+# ---------------------------------------------------------------------------
+
+
+class CampusAddressRead(BaseModel):
+    """One college at one campus, and the full address that combination names."""
+
+    college_id: int
+    college_short_name: str
+    campus_id: int
+    campus_code: str
+    campus_name: str
+    state: str
+    #: `None` for a combination approved before the dictionary. Never guessed.
+    address: str | None = None
+    is_active: bool
+
+
+class CampusAddressWrite(BaseModel):
+    college_id: int
+    campus_id: int
+    address: str = Field(..., min_length=1, max_length=300)
+
+
+class CourseOfferingIntakeRead(BaseModel):
+    intake_label: str
+    students: int
+
+
+class CourseOfferingStudentsRead(BaseModel):
+    total: int
+    coe: int
+    non_coe: int
+
+
+class CourseOfferingDetailRead(BaseModel):
+    """Everything the site knows about one course record (21 September 2026)."""
+
+    id: int
+    course_code: str
+    college_short_name: str
+    college_full_name: str
+    campus_name: str
+    campus_code: str
+    state: str
+    #: The Campus Address Dictionary entry for this college at this campus.
+    address: str | None = None
+    address_is_from_dictionary: bool = False
+    city: str | None = None
+    campus_source_addresses: list[str] = Field(default_factory=list)
+    qualification_code: str | None = None
+    qualification_title: str
+    course_level: str | None = None
+    field_of_education_broad: str | None = None
+    field_of_education_narrow: str | None = None
+    course_sector: str | None = None
+    source_url: str | None = None
+    course_status_label: str
+    course_status_code: str
+    total_course_cost: Decimal | None = None
+    duration_options: list[int] = Field(default_factory=list)
+    students: CourseOfferingStudentsRead
+    intakes: list[CourseOfferingIntakeRead] = Field(default_factory=list)
+    #: Timetable rows stored for this qualification at this college and campus.
+    classes: int = 0
+    #: Approved rooms this college may use at this campus.
+    rooms: int = 0
+    is_deleted: bool = False

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AllocationPackageRead(BaseModel):
@@ -22,8 +22,12 @@ class DiscrepancyRead(BaseModel):
     message: str
     issue_id: str = ""
     can_edit: bool = False
+    #: What the issue offers, decided by its kind (15 September 2026):
+    #: SUGGESTION, EXCEPTION, UNSTORABLE, or EXCLUDED for a row taken out.
+    category: str = "UNSTORABLE"
     can_raise_suggestion: bool = False
     can_except: bool = False
+    can_exclude: bool = False
     edit_fields: list[dict] = []
 
 
@@ -45,6 +49,8 @@ class ImportReviewRead(BaseModel):
     can_apply: bool
     raise_suggestions: bool = True
     existing_deliveries: int = 0
+    exceptions_accepted: int = 0
+    rows_excluded: int = 0
 
 
 class ImportApplyRead(BaseModel):
@@ -53,11 +59,26 @@ class ImportApplyRead(BaseModel):
     sessions_written: int
     deliveries_removed: int
     suggestions_raised: int
-    #: Values accepted as exceptions and recorded (section 2.9).
-    exceptions_recorded: int = 0
-    #: Values that were already decided and so were not reopened (2.9.2).
+    #: Broken rules accepted for this import only (15 September 2026). Nothing
+    #: about an acceptance is kept for the next import.
+    exceptions_accepted: int = 0
+    rows_excluded: int = 0
     warnings: list[str] = []
     apply_mode: str
+
+
+class CoveredClassRead(BaseModel):
+    """One unit's class day inside a merged MSCRIS entry."""
+
+    session_id: int
+    delivery_id: int
+    unit_code: str
+    unit_title: str
+    qualification_code: str
+    college: str
+    campus: str
+    intakes: list[str]
+    student_count: int = 0
 
 
 class CalendarSessionRead(BaseModel):
@@ -70,6 +91,12 @@ class CalendarSessionRead(BaseModel):
     unit_code: str
     unit_title: str
     qualification_code: str
+    college: str = ""
+    campus: str = ""
+    duration_weeks: int | None = None
+    #: The delivery's dates: one stored row is one unit's delivery.
+    unit_start_date: str = ""
+    unit_end_date: str = ""
     classroom: str
     trainer: str
     delivery_mode: str
@@ -78,20 +105,33 @@ class CalendarSessionRead(BaseModel):
     intake_match_status: str
     needs_allocation: bool
     not_found: bool
+    #: Active students attending: their college, campus and qualification are the
+    #: class's, and their rolling intake is one the class was matched to.
+    student_count: int = 0
+    #: Every stored class day this entry stands for: one, or each class day of a
+    #: merged MSCRIS entry. An edit to the entry applies to all of them.
+    session_ids: list[int] = []
+    #: The units a merged MSCRIS entry covers. Empty for any other entry.
+    covered: list[CoveredClassRead] = []
 
 
 class ExpectedUnitRead(BaseModel):
+    """A unit the rolling timetable schedules this week that no class teaches yet."""
+
     unit_code: str
-    intake_label: str
-    scheduled: bool
+    qualification_codes: list[str]
+    intake_labels: list[str]
 
 
 class CalendarDayRead(BaseModel):
     date: str
     weekday: str
     sessions: list[CalendarSessionRead]
+    #: Unique units with a Theory or Practical class this day. MSCRIS is not counted.
+    allocated_unit_count: int = 0
+    #: A weekly figure, the same on every day of the week (approved 17 September 2026).
+    expected_unit_count: int = 0
     expected_units: list[ExpectedUnitRead]
-    student_count: int | None = None
 
 
 class CalendarRead(BaseModel):
@@ -103,12 +143,87 @@ class CalendarRead(BaseModel):
     empty: bool
 
 
+class SpreadsheetSessionRead(BaseModel):
+    session_id: int
+    stream: str
+    weekday: str
+    start_time: str
+    end_time: str
+    delivery_mode: str
+    facility_id: int | None = None
+    classroom: str = ""
+    classroom_capacity: int | None = None
+    trainer: str = ""
+    trainer_id: int | None = None
+
+
+class SpreadsheetRowRead(BaseModel):
+    sl_no: int
+    delivery_id: int
+    college: str
+    campus: str
+    qualification_code: str
+    qualification_title: str
+    duration_weeks: int
+    group: str
+    intakes: list[str]
+    total_students: int
+    coe_students: int
+    non_coe_students: int
+    unit_code: str
+    unit_title: str
+    unit_start_date: dt.date
+    unit_end_date: dt.date
+    uoc_type: str
+    mode_of_delivery: str
+    sessions: list[SpreadsheetSessionRead]
+
+
+class SpreadsheetListRead(BaseModel):
+    items: list[SpreadsheetRowRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class SpreadsheetClassroomChoice(BaseModel):
+    id: int | None = None
+    name: str
+    capacity: int | None = None
+
+
+class SpreadsheetTrainerChoice(BaseModel):
+    id: int
+    name: str
+
+
+class SpreadsheetChoicesRead(BaseModel):
+    classrooms: list[SpreadsheetClassroomChoice]
+    trainers: list[SpreadsheetTrainerChoice]
+
+
 class SessionPatch(BaseModel):
     weekday: str
     start_time: str
     end_time: str
     classroom: str | None = None
     trainer: str | None = None
+    facility_id: int | None = None
+    trainer_id: int | None = None
+
+
+class MscrisGroupPatch(BaseModel):
+    """An edit to a merged MSCRIS entry, applied to every class day it covers."""
+
+    session_ids: list[int] = Field(..., min_length=1)
+    start_time: str
+    end_time: str
+    classroom: str | None = None
+    trainer: str | None = None
+
+
+class MscrisGroupRead(BaseModel):
+    updated: int
 
 
 class SessionAdd(BaseModel):
@@ -146,6 +261,8 @@ class SuggestionRead(BaseModel):
     entity_type: str
     raw_value: str
     context: dict = {}
+    #: The raising row's other values, for pre-filling the form Add opens.
+    attributes: dict = {}
     source: str
     occurrence_count: int
     first_seen_at: dt.datetime
@@ -176,6 +293,10 @@ class SuggestionResolve(BaseModel):
     #: name - so the title is asked for rather than invented. Where the record
     #: does already exist, CREATE finds it and this stays empty.
     create_values: dict[str, str] | None = None
+    #: Required by REJECT when unverified students carry the value: a student
+    #: is deleted the approved way, with a reason and a recovery window (DATA-04).
+    reason_code: str | None = None
+    reason_detail: str | None = None
 
 
 class SuggestionResolveResult(BaseModel):

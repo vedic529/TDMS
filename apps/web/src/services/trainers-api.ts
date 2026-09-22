@@ -91,6 +91,42 @@ export interface TrainerDetail {
   qualifications: TrainerQualificationGroup[];
 }
 
+export interface TrainerTimetableClass {
+  class_key: string;
+  session_ids: number[];
+  unit_code: string;
+  unit_title: string;
+  classroom: string;
+  colleges: string[];
+  campuses: string[];
+  times: string[];
+  delivery_modes: string[];
+  uoc_types: string[];
+  streams: string[];
+  co_trainers: string[];
+  moodle_link: string | null;
+}
+
+export interface TrainerTimetableDay {
+  date: string;
+  classes: TrainerTimetableClass[];
+}
+
+export interface TrainerTimetable {
+  trainer_id: number;
+  trainer_name: string;
+  month: string;
+  days: TrainerTimetableDay[];
+}
+
+export interface TrainerTimetableStudent {
+  id: number;
+  student_id: string;
+  first_name: string;
+  last_name: string | null;
+  coe_status: string;
+}
+
 export interface UnitCoverageRow {
   unit_id: number;
   unit_code: string;
@@ -159,13 +195,12 @@ export interface MissingTrainerGroup {
  * A value in the file that matches no approved record.
  *
  * Detected at staging but **not** raised: whether it becomes a suggestion is
- * the user's decision. There is no exception path — a qualification or a unit
- * either exists in the reference data or it does not, so the only resolutions
- * offered afterwards are Create Record and Map Record.
+ * the user's decision. An unmatched value is never accepted as an exception, so
+ * the only resolutions offered afterwards are Add and Map.
  */
 export interface UnresolvedValue {
   key: string;
-  entity_type: 'CAMPUS' | 'QUALIFICATION' | 'UNIT';
+  entity_type: 'CAMPUS' | 'QUALIFICATION' | 'UNIT' | 'CITY';
   raw_value: string;
   context: Record<string, string>;
   row_count: number;
@@ -317,6 +352,17 @@ export const trainersApi = {
   /** Everything the side panel shows, in one round trip. */
   get: (id: number) => request<TrainerDetail>(`/trainers/${id}`),
 
+  timetable: (id: number, month: string) =>
+    request<TrainerTimetable>(`/trainers/${id}/timetable${query({ month: `${month}-01` })}`),
+
+  timetableStudents: (id: number, classDate: string, sessionIds: number[]) => {
+    const search = new URLSearchParams({ class_date: classDate });
+    sessionIds.forEach((sessionId) => search.append('session_ids', String(sessionId)));
+    return request<{ items: TrainerTimetableStudent[]; total: number }>(
+      `/trainers/${id}/timetable/students?${search.toString()}`,
+    );
+  },
+
   /**
    * The id this trainer would be given, previewed while the name is typed.
    * Nothing is reserved — it is generated again when the record is created.
@@ -400,6 +446,11 @@ export const trainersApi = {
       excluded_row_ids?: number[];
       exclude_missing_trainers?: boolean;
       override_decisions?: Record<number, 'KEEP_STORED' | 'TAKE_FROM_FILE'>;
+      /** A broken rule accepted for this import only, and Undo for it. */
+      accepted_exception_row_ids?: number[];
+      withdrawn_exception_row_ids?: number[];
+      /** Undo for an exclusion. */
+      included_row_ids?: number[];
     },
   ) =>
     request<ImportReview>(`/trainers/import/${batchId}/rows`, {
@@ -409,6 +460,9 @@ export const trainersApi = {
         excluded_row_ids: payload.excluded_row_ids ?? [],
         exclude_missing_trainers: payload.exclude_missing_trainers ?? false,
         override_decisions: payload.override_decisions ?? {},
+        accepted_exception_row_ids: payload.accepted_exception_row_ids ?? [],
+        withdrawn_exception_row_ids: payload.withdrawn_exception_row_ids ?? [],
+        included_row_ids: payload.included_row_ids ?? [],
       }),
     }),
 

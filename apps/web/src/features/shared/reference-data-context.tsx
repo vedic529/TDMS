@@ -2,12 +2,16 @@
 
 import * as React from 'react';
 
-import type { ReferenceDataBundle } from '@/services/dataset';
-import { getTdmsClient } from '@/services';
 import { referenceApi } from '@/services/reference-api';
 import { qualificationCodeLabel } from '@/features/reference-data/reference-adapters';
 import type { Campus, College, QualificationOffering } from '@/types/reference';
 import type { SelectOption } from '@/types/common';
+
+interface ReferenceDataBundle {
+  colleges: College[];
+  campuses: Campus[];
+  qualificationOfferings: QualificationOffering[];
+}
 
 interface ReferenceDataContextValue {
   data: ReferenceDataBundle | null;
@@ -37,10 +41,8 @@ export function ReferenceDataProvider({ children }: { children: React.ReactNode 
       // Colleges, campuses and the qualifications actually offered come from
       // PostgreSQL through the reference API — the same source Page 4 uses.
       //
-      // Everything downstream of this provider (Student, Trainer, Timetable
-      // filters and forms) previously read them from the prototype dataset,
-      // which is why those pages offered "AIBT Global" and "AIBT International"
-      // instead of the six real colleges. One source, one answer.
+      // Everything downstream of this provider uses the same database-backed
+      // college, campus and qualification offering records.
       const [collegeRows, campusRows, courseRows] = await Promise.all([
         referenceApi.listColleges(),
         referenceApi.listCampuses(),
@@ -96,13 +98,7 @@ export function ReferenceDataProvider({ children }: { children: React.ReactNode 
         });
       }
 
-      // Facilities, trainers, unit sequences and groups are not yet served by a
-      // real API. They come from the transitional client until their own
-      // modules migrate, and are the only part of this bundle still doing so.
-      const transitional = await getTdmsClient().getReferenceData();
-
       setData({
-        ...transitional,
         colleges,
         campuses,
         qualificationOfferings,

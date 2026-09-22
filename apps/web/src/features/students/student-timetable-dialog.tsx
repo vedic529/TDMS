@@ -38,6 +38,12 @@ function formatTime(value: string): string {
 /** The full sentence for each empty state — never "no timetable found". */
 function emptyMessage(data: StudentTimetable): { title: string; description: string } {
   switch (data.empty_reason) {
+    case 'UNVERIFIED':
+      return {
+        title: 'Unverified record',
+        description:
+          "This student's college, campus or qualification matches no approved record yet, so there is no campus to draw a timetable for. It appears once the raised suggestion is resolved.",
+      };
     case 'CREDIT_TRANSFER':
       return {
         title: 'Credit Transfer student',

@@ -11,6 +11,7 @@ import { DataTable, type DataTableColumn } from '@/components/common/data-table'
 import { EmptyState, ErrorState } from '@/components/common/states';
 import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
 import { suggestionsApi } from '@/services/suggestions-api';
+import { attributeList } from '@/features/shared/suggestion-prefill';
 import { ExportMenu } from '@/components/common/export-menu';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useCascadingFilters } from './use-cascading-filters';
@@ -84,7 +85,11 @@ export function FacilityDataPanel() {
   const roomPrefill = React.useMemo(
     () =>
       fromSuggestion.suggestion?.entity_type === 'FACILITY'
-        ? { reference: fromSuggestion.suggestion.raw_value, campusId: suggestedCampusId }
+        ? {
+            reference: fromSuggestion.suggestion.raw_value,
+            campusId: suggestedCampusId,
+            collegeNames: attributeList(fromSuggestion.suggestion, 'colleges'),
+          }
         : null,
     [fromSuggestion.suggestion, suggestedCampusId],
   );
