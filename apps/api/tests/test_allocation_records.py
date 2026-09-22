@@ -294,6 +294,8 @@ def test_mscris_five_hour_session_is_not_a_length_warning(session, refs):
     assert mscris
     assert mscris[0].start_time == time(9, 0)
     assert mscris[0].end_time == time(14, 0)
+    assert mscris[0].virtual_kind == "FACE_TO_FACE_VC"
+    assert mscris[0].classroom_text == "Face to Face VC"
 
 
 def test_na_optional_columns_raise_nothing(session, refs):
@@ -478,7 +480,8 @@ def test_calendar_query_cost_is_two(session, refs, people):
     finally:
         event.remove(session.bind, "before_cursor_execute", before)
     assert grid["query_cost"] == CALENDAR_QUERY_COUNT
-    assert len(queries) == 2
+    # Sessions, the rolling timetable, and attendance - never one per day.
+    assert len(queries) == CALENDAR_QUERY_COUNT
     wednesday = next(day for day in grid["days"] if day["weekday"] == "WEDNESDAY")
     assert wednesday["sessions"]
 
@@ -531,13 +534,15 @@ def test_unknown_header_can_be_excepted(session, refs):
     assert planned
 
 
-def test_unresolved_can_be_excepted_or_raised_when_toggle_off(session, refs, people):
+def test_unresolved_is_raised_never_excepted_when_toggle_off(session, refs, people):
     payload = csv_bytes([base_row(refs, **{"Theory Classroom Name": "Unknown Room"})])
     review, _, _ = validate_bytes(
         session, training_package="BSB", file_name="s.csv", payload=payload, raise_suggestions=False
     )
     item = next(issue for issue in review.discrepancies if issue.kind == "unresolved_reference")
-    excepted, planned, suggestions = validate_bytes(
+    # Updated 15 September 2026: an unmatched value is never accepted as an
+    # exception. An exception id for it settles nothing - raising it does.
+    excepted, _planned, collected = validate_bytes(
         session,
         training_package="BSB",
         file_name="s.csv",
@@ -545,14 +550,11 @@ def test_unresolved_can_be_excepted_or_raised_when_toggle_off(session, refs, peo
         raise_suggestions=False,
         overrides=ImportOverrides.from_payload({"except_ids": [issue_id(item)]}, False),
     )
-    assert not excepted.refused
-    assert planned
-    # Updated 26 August 2026 (section 2.9): an accepted exception is now
-    # collected during validation and written at apply time, so it appears here
-    # tagged EXCEPT. What it must never be is a *pending suggestion* — which is
-    # what the original assertion was really protecting.
-    assert all(item["kind"] == "EXCEPT" for item in suggestions.values())
-    assert excepted.suggestions_that_would_be_raised == 0
+    assert any(
+        issue.kind == "unresolved_reference" and issue.severity == "refuse"
+        for issue in excepted.discrepancies
+    )
+    assert not collected
     raised, planned_raised, suggestions_raised = validate_bytes(
         session,
         training_package="BSB",
@@ -561,7 +563,10 @@ def test_unresolved_can_be_excepted_or_raised_when_toggle_off(session, refs, peo
         raise_suggestions=False,
         overrides=ImportOverrides.from_payload({"raise_ids": [issue_id(item)]}, False),
     )
-    assert not raised.refused
+    assert not any(
+        issue.kind == "unresolved_reference" and issue.severity == "refuse"
+        for issue in raised.discrepancies
+    )
     assert planned_raised
     assert suggestions_raised
 
@@ -596,3 +601,215 @@ def test_empty_calendar(session):
     grid = calendar_month(session, training_package="BSB", start_date=MONDAY, end_date=MONDAY + timedelta(days=6))
     assert grid["empty"] is True
     assert grid["days"]
+
+
+def _mscris_classes(session, refs):
+    """Three MSCRIS class days on one Saturday: two alike, one with another trainer.
+
+    One imported row gives the first. The other two are copies of its delivery
+    under other units, so all three cover the same Saturday.
+    """
+    payload = csv_bytes(
+        [
+            base_row(
+                refs,
+                **{
+                    "MSCRIS Class Name": "Face to Face Virtual",
+                    "MSCRIS Days and Times": "Saturday- 1 pm to 6 pm",
+                    "MSCRIS Trainers": "TBD",
+                },
+            )
+        ]
+    )
+    user = session.execute(select(User).where(User.organisation_email == EDITOR)).scalar_one()
+    apply_rows(session, training_package="BSB", file_name="m.csv", file_size_bytes=10, payload=payload, apply_mode="REPLACE", user=user)
+    session.commit()
+    original = session.execute(select(AllocationDelivery)).scalar_one()
+    mscris = session.execute(select(AllocationSession).where(AllocationSession.stream == "MSCRIS")).scalar_one()
+
+    def unit(code):
+        found = session.execute(text("SELECT id FROM units WHERE unit_code = :c"), {"c": code}).scalar_one_or_none()
+        return found or session.execute(
+            text("INSERT INTO units (unit_code, unit_title, is_active) VALUES (:c, :c, true) RETURNING id"), {"c": code}
+        ).scalar_one()
+
+    for code, trainer in (("T_MSCRIS_A", "TBD"), ("T_MSCRIS_B", "Other Trainer")):
+        copy = AllocationDelivery(
+            training_package="BSB",
+            college_id=original.college_id,
+            campus_id=original.campus_id,
+            qualification_id=original.qualification_id,
+            duration_weeks=original.duration_weeks,
+            group_code=original.group_code,
+            unit_id=unit(code),
+            uoc_type=original.uoc_type,
+            mode_of_delivery=original.mode_of_delivery,
+            start_date=original.start_date,
+            end_date=original.end_date,
+            intake_match_status=original.intake_match_status,
+        )
+        session.add(copy)
+        session.flush()
+        session.add(
+            AllocationSession(
+                training_package="BSB",
+                delivery_id=copy.id,
+                stream="MSCRIS",
+                weekday="SATURDAY",
+                start_time=mscris.start_time,
+                end_time=mscris.end_time,
+                delivery_mode="VIRTUAL",
+                virtual_kind=mscris.virtual_kind,
+                classroom_text=mscris.classroom_text,
+                trainer_text=trainer,
+            )
+        )
+    session.commit()
+    return user
+
+
+def test_mscris_class_days_alike_are_one_calendar_entry(session, refs, people):
+    """Approved 17 September 2026: one entry per MSCRIS class, listing its units."""
+    _mscris_classes(session, refs)
+    saturday = MONDAY + timedelta(days=5)
+    grid = calendar_month(session, training_package="BSB", start_date=saturday, end_date=saturday)
+    entries = [item for item in grid["days"][0]["sessions"] if item["stream"] == "MSCRIS"]
+
+    assert len(entries) == 2, "same time, room and trainer merge; another trainer is another class"
+    alike = next(item for item in entries if item["trainer"] == "TBD")
+    assert alike["unit_code"] == "MSCRIS"
+    assert len(alike["session_ids"]) == 2
+    assert sorted(item["unit_code"] for item in alike["covered"]) == ["BSBCRT511", "T_MSCRIS_A"]
+    other = next(item for item in entries if item["trainer"] == "Other Trainer")
+    assert [item["unit_code"] for item in other["covered"]] == ["T_MSCRIS_B"]
+
+
+def test_editing_an_mscris_entry_changes_every_class_day_it_covers(session, refs, people):
+    """The entry is one class: its time and trainer cannot differ between its units."""
+    from app.services.allocation_edit import AllocationEditError, update_mscris_group
+
+    user = _mscris_classes(session, refs)
+    saturday = MONDAY + timedelta(days=5)
+    grid = calendar_month(session, training_package="BSB", start_date=saturday, end_date=saturday)
+    alike = next(item for item in grid["days"][0]["sessions"] if item["stream"] == "MSCRIS" and item["trainer"] == "TBD")
+
+    updated = update_mscris_group(
+        session, user, session_ids=alike["session_ids"], training_package="BSB",
+        start_time=time(9, 0), end_time=time(14, 0), classroom=None, trainer="Named Trainer",
+    )
+    session.commit()
+    assert updated == 2
+    rows = session.execute(select(AllocationSession).where(AllocationSession.id.in_(alike["session_ids"]))).scalars().all()
+    assert {(row.start_time, row.trainer_text) for row in rows} == {(time(9, 0), "Named Trainer")}
+    untouched = session.execute(select(AllocationSession).where(AllocationSession.trainer_text == "Other Trainer")).scalar_one()
+    assert untouched.start_time == time(13, 0)
+    assert session.execute(
+        select(UserActivityRecord).where(UserActivityRecord.plain_language_detail.like("Updated an MSCRIS class covering 2%"))
+    ).scalar_one()
+
+    theory = session.execute(select(AllocationSession).where(AllocationSession.stream == "THEORY")).scalars().first()
+    with pytest.raises(AllocationEditError):
+        update_mscris_group(
+            session, user, session_ids=[theory.id], training_package="BSB",
+            start_time=time(9, 0), end_time=time(14, 0), classroom=None, trainer=None,
+        )
+
+
+def test_a_day_counts_its_units_and_the_week_counts_what_is_expected(session, refs, people):
+    """Approved 17 September 2026.
+
+    Allocated units: unique units with a Theory or Practical class that day.
+    Expected units: units the rolling timetable schedules that week with no
+    Theory or Practical class anywhere in it - the same figure on every day.
+    MSCRIS allocates nothing: a unit taught only there is still expected.
+    """
+    label = "T_CAL_WEEK_INTAKE"
+    session.execute(text("DELETE FROM rolling_timetable_weeks WHERE intake_label = :l"), {"l": label})
+    for unit_code in ("BSBCRT511", "T_ONLY_MSCRIS", "T_NOBODY"):
+        session.execute(
+            text(
+                "INSERT INTO rolling_timetable_weeks "
+                "(training_package, qualification_code, duration_weeks, intake_label, intake_group, "
+                " intake_start_date, week_no, week_start_date, week_end_date, schedule_type, "
+                " schedule_value, unit_code, unit_count, unit_slot) "
+                "VALUES ('BSB', 'BSB50420', 52, :l, 'NA', :monday, 1, :monday, :sunday, 'UNIT', :u, :u, 1, "
+                " (SELECT count(*) + 1 FROM rolling_timetable_weeks WHERE intake_label = :l))"
+            ),
+            {"l": label, "u": unit_code, "monday": MONDAY, "sunday": MONDAY + timedelta(days=6)},
+        )
+    session.commit()
+
+    payload = csv_bytes([base_row(refs)])  # BSBCRT511, Wednesday and Thursday
+    user = session.execute(select(User).where(User.organisation_email == EDITOR)).scalar_one()
+    apply_rows(session, training_package="BSB", file_name="w.csv", file_size_bytes=10, payload=payload, apply_mode="REPLACE", user=user)
+    delivery = session.execute(select(AllocationDelivery)).scalar_one()
+    only_mscris = session.execute(
+        text("INSERT INTO units (unit_code, unit_title, is_active) VALUES ('T_ONLY_MSCRIS', 'x', true) "
+             "ON CONFLICT (unit_code) DO UPDATE SET unit_title = 'x' RETURNING id")
+    ).scalar_one()
+    copy = AllocationDelivery(
+        training_package="BSB", college_id=delivery.college_id, campus_id=delivery.campus_id,
+        qualification_id=delivery.qualification_id, duration_weeks=delivery.duration_weeks,
+        group_code=delivery.group_code, unit_id=only_mscris, uoc_type=delivery.uoc_type,
+        mode_of_delivery=delivery.mode_of_delivery, start_date=delivery.start_date,
+        end_date=delivery.end_date, intake_match_status=delivery.intake_match_status,
+    )
+    session.add(copy)
+    session.flush()
+    session.add(
+        AllocationSession(
+            training_package="BSB", delivery_id=copy.id, stream="MSCRIS", weekday="SATURDAY",
+            start_time=time(13, 0), end_time=time(18, 0), delivery_mode="VIRTUAL",
+            virtual_kind="FACE_TO_FACE_VC", classroom_text="Face to Face VC", trainer_text="TBD",
+        )
+    )
+    session.commit()
+
+    grid = calendar_month(session, training_package="BSB", start_date=MONDAY, end_date=MONDAY + timedelta(days=6))
+    by_day = {day["weekday"]: day for day in grid["days"]}
+
+    assert by_day["WEDNESDAY"]["allocated_unit_count"] == 1
+    assert by_day["MONDAY"]["allocated_unit_count"] == 0
+    assert by_day["SATURDAY"]["allocated_unit_count"] == 0, "MSCRIS is not counted"
+    counts = {day["expected_unit_count"] for day in grid["days"]}
+    assert counts == {2}, "the week's figure, on every day including Sunday"
+    assert [item["unit_code"] for item in by_day["SUNDAY"]["expected_units"]] == ["T_NOBODY", "T_ONLY_MSCRIS"]
+
+    # A range starting mid-week still sees the classes earlier in that week.
+    thursday_on = calendar_month(
+        session, training_package="BSB", start_date=MONDAY + timedelta(days=3), end_date=MONDAY + timedelta(days=6)
+    )
+    assert {day["expected_unit_count"] for day in thursday_on["days"]} == {2}
+    assert thursday_on["days"][0]["date"] == (MONDAY + timedelta(days=3)).isoformat()
+
+
+def test_the_download_is_the_spreadsheet_view_as_it_is_shown(session, refs, people):
+    """Approved 21 September 2026: the file's columns are the screen's columns."""
+    import csv as _csv
+    import io as _io
+
+    from app.services.allocation_export import SPREADSHEET_COLUMNS, export_spreadsheet
+
+    payload = csv_bytes([base_row(refs)])
+    user = session.execute(select(User).where(User.organisation_email == EDITOR)).scalar_one()
+    apply_rows(session, training_package="BSB", file_name="d.csv", file_size_bytes=10, payload=payload, apply_mode="REPLACE", user=user)
+    session.commit()
+
+    name, content, media = export_spreadsheet(
+        session, training_package="BSB", start_date=MONDAY, end_date=MONDAY + timedelta(days=27), file_format="csv"
+    )
+    assert name.endswith(".csv") and media == "text/csv"
+    rows = list(_csv.reader(_io.StringIO(content.decode("utf-8-sig"))))
+    assert rows[0] == list(SPREADSHEET_COLUMNS)
+    row = dict(zip(rows[0], rows[1]))
+    assert row["College"].startswith("T_CO_"), "the short name, as the screen shows it"
+    assert row["Units of Competency ID"] == "BSBCRT511"
+    assert row["UoC Type"] == "Theory Only"
+    assert row["Theory Class Days and Times"] == "Wednesday · 09:00–17:00\nThursday · 09:00–17:00"
+    assert row["Theory Classroom Name"] == "Room 1"
+    assert row["Practical Class Days and Times"] == "Not required", "a theory-only unit says so, as on screen"
+
+    excel_name, excel, excel_media = export_spreadsheet(
+        session, training_package="BSB", start_date=MONDAY, end_date=None
+    )
+    assert excel_name.endswith(".xlsx") and excel and "spreadsheetml" in excel_media

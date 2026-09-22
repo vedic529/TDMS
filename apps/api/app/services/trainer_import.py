@@ -5,10 +5,13 @@ to one package: the real BSB workbook contains a trainer who teaches only FNS
 qualifications. The two accepted shapes are `LOCATION` and `UNITS`, and the
 choice selects the column map.
 
-**No exception path** (1.8). A qualification or unit either exists in the
-reference data or it does not, so an unmatched value offers Create Record or Map
-Record only. This differs deliberately from the allocation import; do not copy
-that behaviour here.
+**What each issue offers** (approved 15 September 2026, replacing 1.8). A value
+that matches no approved record - a campus, a qualification, a unit, a unit its
+qualification does not list, a city the City Dictionary does not hold - is
+raised as a suggestion, never accepted as an exception. A predefined rule broken
+by a row that can still be stored - the file's city disagreeing with the city
+its campus is in - is accepted as an exception for this import only. A value
+that cannot be stored is corrected, or its row excluded.
 
 **Reuses the Schema v1 staging stack** — `import_batches`, `import_staged_rows`,
 `import_row_issues` — rather than adding a third. A trainer row's working values
@@ -34,13 +37,13 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.allocation import ReferenceSuggestion
-from app.models.college import Campus
+from app.models.college import Campus, City
 from app.models.import_batch import ImportBatch, ImportRowIssue, ImportStagedRow
 from app.models.qualification import Qualification, QualificationUnit, Unit
 from app.models.trainer import Trainer, TrainerAvailability, TrainerUnit
 from app.models.user import User
 from app.services.activity import record_activity
-from app.services.reference_suggestions import raise_reference_suggestion
+from app.services.reference_suggestions import merge_attributes, raise_reference_suggestion
 from app.services.trainers import rebuild_trainer_qualifications
 
 PAGE = "Page 3 - Trainer Data"
@@ -248,6 +251,11 @@ class _Lookups:
                 if alias:
                     self.campuses.setdefault(_key(alias), pk)
 
+        #: The City Dictionary: normalised name -> the name as recorded.
+        self.cities: dict[str, str] = {
+            _key(name): name for (name,) in session.execute(select(City.city_name)).all()
+        }
+
         self.qualifications: dict[str, int] = {}
         for pk, code in session.execute(
             select(Qualification.id, Qualification.qualification_code).where(
@@ -300,6 +308,75 @@ class _Lookups:
 
 def _issue(field: str, message: str, severity: str) -> dict:
     return {"field_name": field, "message": message, "issue_status": severity}
+
+
+def _check_city(
+    values: dict, resolved: dict, lookups: _Lookups, raised: set[str], issues: list[dict]
+) -> None:
+    """The file's Trainer Campus, checked against the City Dictionary (15 September 2026).
+
+    * A city the dictionary does not hold is an unmatched value: a CITY
+      suggestion, raised like any other. Raised, the row imports with the city
+      as written, and adding or mapping the city closes the entry.
+    * A city the dictionary holds that disagrees with the city the row's campus
+      is in breaks a rule: an exception, accepted for this import only.
+    * Offshore is not a city, and a campus with no city recorded has nothing to
+      disagree with.
+
+    `resolved["city"]` is what the trainer's city is stored as: the dictionary's
+    spelling when it holds the city, the file's otherwise.
+    """
+    declared = _norm(values.get("trainer_campus"))
+    resolved["city"] = None
+    if not declared or _key(declared) == "OFFSHORE" or resolved.get("is_offshore"):
+        return
+
+    known = lookups.cities.get(_key(declared))
+    if known is None:
+        resolved["city"] = declared
+        if _unresolved_key("CITY", declared, {}) in raised:
+            issues.append(
+                _issue(
+                    "Trainer Campus",
+                    f"'{declared}' has been raised as a suggestion. Stored as written until the "
+                    "city is added to the City Dictionary or mapped.",
+                    "RAISED",
+                )
+            )
+        else:
+            issues.append(
+                _issue(
+                    "Trainer Campus",
+                    f"'{declared}' is not in the City Dictionary. Add the city, or map it to one "
+                    "that is.",
+                    "UNRESOLVED",
+                )
+            )
+        return
+
+    resolved["city"] = known
+    campus_id = resolved.get("campus_id")
+    recorded = lookups.campus_city.get(campus_id) if campus_id else None
+    if recorded and _key(recorded) != _key(known):
+        location = _norm(values.get("location"))
+        if values.get("_accepted_exception"):
+            issues.append(
+                _issue(
+                    "Trainer Campus",
+                    f"The file says '{known}' but {location} is in '{recorded}'. Accepted as an "
+                    "exception for this import.",
+                    "ACCEPTED",
+                )
+            )
+        else:
+            issues.append(
+                _issue(
+                    "Trainer Campus",
+                    f"The file says '{known}' but {location} is in '{recorded}'. Correct the file, "
+                    "or accept it as an exception for this import.",
+                    "EXCEPTION",
+                )
+            )
 
 
 def _validate_location(values: dict, lookups: _Lookups, raised: set[str]) -> tuple[list[dict], dict]:
@@ -355,19 +432,8 @@ def _validate_location(values: dict, lookups: _Lookups, raised: set[str]) -> tup
         else:
             resolved["campus_id"] = campus_id
             resolved["location_text"] = None
-            city = lookups.campus_city.get(campus_id)
-            declared = _norm(values.get("trainer_campus"))
-            # New data; the city may simply be missing, so this warns rather
-            # than refusing (check A10).
-            if city and declared and _key(city) != _key(declared):
-                issues.append(
-                    _issue(
-                        "Trainer Campus",
-                        f"The file says '{declared}' but {location} is recorded in "
-                        f"'{city}'. Stored as given.",
-                        "WARNING",
-                    )
-                )
+
+    _check_city(values, resolved, lookups, raised, issues)
 
     window = parse_working_time(values.get("working_time", ""))
     if window is None:
@@ -463,14 +529,21 @@ def _validate_units(values: dict, lookups: _Lookups, raised: set[str]) -> tuple[
             )
         )
 
-    # Membership is a warning, not a refusal: the reference data may be
-    # incomplete, and refusing would block a correct file (check B6).
+    # A unit its qualification does not list is an unmatched value (15 September
+    # 2026, replacing check B6's warning): the same membership gap a rolling
+    # timetable raises, raised the same way. Raised, the row imports as given, and
+    # adding the unit to the qualification closes the entry.
     if qualification_pk and unit_pk and (qualification_pk, unit_pk) not in lookups.membership:
+        raised_here = _unresolved_key("UNIT", unit, {"qualification": qual}) in raised
         issues.append(
             _issue(
                 "Units They Can Teach",
-                f"'{unit}' is not recorded as part of {qual}. Stored as given.",
-                "WARNING",
+                f"'{unit}' is not listed under {qual}. It has been raised as a suggestion and is "
+                "stored as given until it is added to the qualification."
+                if raised_here
+                else f"'{unit}' is not listed under {qual}. Raise a suggestion to add it to the "
+                "qualification.",
+                "RAISED" if raised_here else "UNRESOLVED",
             )
         )
     return issues, resolved
@@ -539,7 +612,7 @@ def _status_for(issues: list[dict], duplicate: bool) -> str:
         return "DUPLICATE"
     if "UNMATCHED" in codes:
         return "UNMATCHED_REFERENCE"
-    if "ERROR" in codes or "UNRESOLVED" in codes:
+    if "ERROR" in codes or "UNRESOLVED" in codes or "EXCEPTION" in codes:
         return "NEEDS_CORRECTION"
     return "READY"
 
@@ -701,8 +774,15 @@ def collect_unresolved(session: Session, batch_id: int) -> list[dict]:
         for issue in issues.get(row.id, []):
             if issue.issue_status not in {"UNRESOLVED", "RAISED"}:
                 continue
+            attributes: dict = {}
             if issue.field_name == "Location":
                 entity, raw, context = "CAMPUS", _norm(values.get("location")), {}
+            elif issue.field_name == "Trainer Campus":
+                entity, raw, context = "CITY", _norm(values.get("trainer_campus")), {}
+                # The campuses the city was named for, so the dictionary form can
+                # arrive with them chosen.
+                location = _norm(values.get("location"))
+                attributes = {"campuses": [location]} if location else {}
             elif issue.field_name == "Qualifications They Can Teach":
                 entity, raw, context = "QUALIFICATION", _norm(values.get("qualification_code")), {}
             else:
@@ -723,9 +803,11 @@ def collect_unresolved(session: Session, batch_id: int) -> list[dict]:
                     "in_queue": False,
                     "queue_status": None,
                     "raised_here": False,
+                    "attributes": {},
                 },
             )
             entry["row_count"] += 1
+            entry["attributes"] = merge_attributes(entry["attributes"], attributes)
 
     raised_here = _raised_keys(rows)
     for entry in wanted.values():
@@ -787,6 +869,7 @@ def raise_values(session: Session, batch_id: int, *, keys: list[str], user: User
             raw_value=entry["raw_value"],
             context=entry["context"],
             source=SOURCE,
+            attributes=entry.get("attributes"),
         )
         raised += 1
         record_activity(
@@ -938,6 +1021,9 @@ def patch_rows(
     exclude_missing_trainers: bool,
     user: User,
     override_decisions: dict | None = None,
+    accepted_exception_row_ids: list[int] | None = None,
+    withdrawn_exception_row_ids: list[int] | None = None,
+    included_row_ids: list[int] | None = None,
 ) -> dict:
     """Apply corrections and decisions, then re-validate every row.
 
@@ -972,6 +1058,20 @@ def patch_rows(
         row = by_id.get(int(row_id))
         if row is not None:
             row.excluded_by_user = True
+
+    # Undo for an exclusion.
+    for row_id in included_row_ids or []:
+        row = by_id.get(int(row_id))
+        if row is not None:
+            row.excluded_by_user = False
+
+    # An exception accepted for this import only (15 September 2026): held on the
+    # staged row, so it goes when the batch does and the next import asks again.
+    for row_ids, accepted in ((accepted_exception_row_ids, True), (withdrawn_exception_row_ids, False)):
+        for row_id in row_ids or []:
+            row = by_id.get(int(row_id))
+            if row is not None:
+                row.working_values = {**(row.working_values or {}), "_accepted_exception": accepted}
 
     if exclude_missing_trainers:
         # 1.9: the single offered action — exclude the unmatched rows so the
@@ -1129,9 +1229,16 @@ def _apply_locations(session: Session, rows: list[ImportStagedRow], *, mode: str
     """
     lookups = _Lookups(session)
     wanted: dict[str, str] = {}
+    #: The city each trainer is based in - the file's Trainer Campus - from the
+    #: first row that states one. Not stored before 15 September 2026, so a city
+    #: raised as a suggestion had nothing behind it.
+    cities: dict[str, str] = {}
     for row in rows:
         values = row.working_values or {}
         code = _key(values.get("trainer_id"))
+        city = str((values.get("_resolved") or {}).get("city") or "").strip()
+        if code and city:
+            cities.setdefault(code, city)
         if code and code not in lookups.trainers:
             wanted[code] = _norm(values.get("trainer_name"))
 
@@ -1139,7 +1246,10 @@ def _apply_locations(session: Session, rows: list[ImportStagedRow], *, mode: str
     if wanted:
         session.execute(
             Trainer.__table__.insert(),
-            [{"trainer_id": code, "trainer_name": name, "is_active": True} for code, name in wanted.items()],
+            [
+                {"trainer_id": code, "trainer_name": name, "city": cities.get(code), "is_active": True}
+                for code, name in wanted.items()
+            ],
         )
         session.flush()
         created = len(wanted)
@@ -1149,6 +1259,21 @@ def _apply_locations(session: Session, rows: list[ImportStagedRow], *, mode: str
             )
         ).all():
             lookups.trainers[_key(code)] = pk
+
+    # A trainer already on record takes the file's city only where none is
+    # recorded: replacing one silently would be a change nobody saw. One
+    # statement per distinct city, never one per trainer.
+    by_city: dict[str, list[int]] = defaultdict(list)
+    for code, city in cities.items():
+        if code not in wanted and code in lookups.trainers:
+            by_city[city].append(lookups.trainers[code])
+    for city, pks in by_city.items():
+        session.execute(
+            update(Trainer)
+            .where(Trainer.id.in_(pks), Trainer.city.is_(None))
+            .values(city=city)
+            .execution_options(synchronize_session=False)
+        )
 
     trainer_pks = {
         lookups.trainers[_key((r.working_values or {}).get("trainer_id"))]

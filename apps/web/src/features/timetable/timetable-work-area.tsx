@@ -17,9 +17,11 @@ import {
   type RollingScope,
 } from '@/services/rolling-timetable-api';
 import { ReferenceApiError } from '@/services/reference-api';
+import { SuggestionIndicator, useAddFromSuggestion } from '@/features/shared/suggestion-indicator';
 import { AllocationRecordsPanel, type AllocationView } from './allocation-records-panel';
 import { RollingDatabaseActions } from './rolling-database-actions';
 import { RollingDatabaseView } from './rolling-database-view';
+import { RollingPlacementDialog } from './rolling-placement-dialog';
 import { RollingScopeBar, selectionFromScopes, type RollingSelection } from './rolling-scope-bar';
 import { RollingVisualizer } from './rolling-visualizer';
 
@@ -60,6 +62,12 @@ export function TimetableWorkArea() {
   const [scopes, setScopes] = React.useState<RollingScope[]>([]);
   const [scopesLoading, setScopesLoading] = React.useState(tab === 'rolling');
   const [scopesError, setScopesError] = React.useState<string | null>(null);
+
+  // A class the rolling timetable does not account for is placed from its
+  // suggestion here, where intakes are maintained (15 September 2026).
+  const fromSuggestion = useAddFromSuggestion();
+  const [placing, setPlacing] = React.useState(false);
+  const [rollingEpoch, setRollingEpoch] = React.useState(0);
 
   const loadScopes = React.useCallback(async () => {
     setScopesLoading(true);
@@ -183,6 +191,15 @@ export function TimetableWorkArea() {
           )}
           {tab === 'rolling' && (
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <SuggestionIndicator
+                key={fromSuggestion.epoch}
+                entityTypes={['ROLLING']}
+                onResolved={() => setRollingEpoch((value) => value + 1)}
+                onAdd={(row) => {
+                  fromSuggestion.start(row);
+                  setPlacing(true);
+                }}
+              />
               <RollingDatabaseActions onImported={() => void loadScopes()} />
               <div
                 className="flex items-center gap-1 rounded-lg border border-border bg-background p-1"
@@ -238,14 +255,29 @@ export function TimetableWorkArea() {
             <>
               <RollingScopeBar scopes={scopes} selection={selection} onChange={(next) => replaceParams({ selection: next })} />
               {rollingView === 'database' ? (
-                <RollingDatabaseView selection={selection} />
+                <RollingDatabaseView key={rollingEpoch} selection={selection} />
               ) : (
-                <RollingVisualizer selection={selection} />
+                <RollingVisualizer key={rollingEpoch} selection={selection} />
               )}
             </>
           )}
         </TabsContent>
       </Tabs>
+
+      <RollingPlacementDialog
+        open={placing}
+        onOpenChange={(open) => {
+          setPlacing(open);
+          if (!open) fromSuggestion.cancel();
+        }}
+        suggestion={fromSuggestion.suggestion}
+        onPlaced={(weekId, action) =>
+          void fromSuggestion.finish(weekId, action).then(() => {
+            setRollingEpoch((value) => value + 1);
+            void loadScopes();
+          })
+        }
+      />
     </div>
   );
 }

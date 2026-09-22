@@ -114,7 +114,9 @@ class Student(Base, SoftDeleteMixin, TimestampMixin):
 
     __tablename__ = "students"
     __table_args__ = (
-        CheckConstraint("proposed_end_date > proposed_start_date", name="course_dates_ordered"),
+        # `course_dates_ordered` was dropped on 15 September 2026: an end date
+        # not after the start is a rule the import checks, and one a person may
+        # accept as an exception.
         soft_delete_check(),
         # Amended (Student Data Import, 25 August 2026). DBQ-08 originally made
         # `student_id` UNIQUE across every row. That blocks a person enrolled in

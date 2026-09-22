@@ -201,15 +201,14 @@ def test_cascade_deletes_only_where_approved(engine):
 @pytest.mark.parametrize(
     ("table_name", "constraint_name"),
     [
-        ("students", "ck_students_course_dates_ordered"),
+        # Amended 15 September 2026: the checks that restated an import rule were
+        # dropped so an accepted exception can be stored. See migration e2b7c4d19f63.
         ("students", "ck_students_soft_delete_metadata_complete"),
         ("facilities", "ck_facilities_capacity_positive"),
         ("offering_duration_options", "ck_offering_duration_options_duration_weeks_positive"),
         ("trainer_availability", "ck_trainer_availability_working_time_ordered"),
-        ("allocation_session", "ck_allocation_session_session_times_ordered"),
-        ("allocation_session", "ck_allocation_session_practical_is_physical"),
-        ("allocation_session", "ck_allocation_session_mscris_saturday_virtual"),
-        ("allocation_delivery", "ck_allocation_delivery_delivery_dates_ordered"),
+        ("allocation_session", "ck_allocation_session_mscris_virtual"),
+        ("allocation_session", "ck_allocation_session_virtual_has_no_facility"),
         ("user_activity_records", "ck_user_activity_records_outcome_present"),
     ],
 )
@@ -462,12 +461,17 @@ def test_duplicate_student_id_is_rejected(connection):
         _insert_student(connection, ids, "T_STU_1")
 
 
-def test_student_end_date_must_follow_start_date(connection):
-    from sqlalchemy.exc import IntegrityError
+def test_student_end_date_rule_is_the_imports_to_enforce(connection):
+    """Amended 15 September 2026.
 
+    This asserted PostgreSQL refused an end date before the start. That is a
+    predefined rule, and a person may accept a row breaking one as an exception,
+    so the database must be able to hold it: the constraint was dropped
+    (migration e2b7c4d19f63) and the import checks the rule instead.
+    """
     ids = _minimal_reference_rows(connection)
-    with pytest.raises(IntegrityError):
-        _insert_student(connection, ids, "T_STU_2", start="2027-01-04", end="2026-01-05")
+    new_id = _insert_student(connection, ids, "T_STU_2", start="2027-01-04", end="2026-01-05")
+    assert new_id
 
 
 def test_generated_duration_uses_inclusive_calculation(connection):

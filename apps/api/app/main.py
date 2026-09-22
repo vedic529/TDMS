@@ -4,12 +4,10 @@ Step 5 adds the first real endpoints: Microsoft Entra authentication, the
 central authorisation policy, the role access-request workflow and the Super
 Admin administration surface.
 
-Student, timetable, trainer, reference-data and bulk-import endpoints are NOT
-implemented yet. The frontend continues to use ``MockTdmsClient`` for those (see
-``apps/web/src/services``).
-
-Supabase is not connected. DATA-07 requires the hosting configuration to be
-approved before a production database is used.
+The API serves the student, trainer, timetable, allocation, reference-data,
+administration and bulk-import workflows from PostgreSQL. Local development
+uses the Docker database; the same migrations can be applied to Supabase when
+the hosted database is configured.
 """
 
 from __future__ import annotations

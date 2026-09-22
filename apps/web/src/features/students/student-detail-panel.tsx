@@ -19,6 +19,18 @@ import { StudentTimetableDialog } from './student-timetable-dialog';
 import { formatDate } from '@/lib/format';
 import type { StudentRecord } from '@/services/students-api';
 
+type ReferenceField = StudentRecord['unverified_fields'][number];
+
+/** A value that matches no approved record: shown in red, and said in words too. */
+function checked(student: StudentRecord, field: ReferenceField, value: string): React.ReactNode {
+  if (!student.unverified_fields.includes(field)) return value;
+  return (
+    <span className="text-destructive" title="Not verified against the approved reference data">
+      {value || '—'} <span className="text-[11px] font-normal">· unverified</span>
+    </span>
+  );
+}
+
 /**
  * One student record, shown in a side panel.
  *
@@ -71,6 +83,15 @@ export function StudentDetailPanel({
         </SheetHeader>
 
         <SheetBody>
+          {student.is_unverified && (
+            <p
+              role="note"
+              className="mb-4 rounded-md border border-destructive/35 bg-destructive-soft px-3 py-2 text-[12px] text-destructive"
+            >
+              This record holds values that match no approved record, shown in red. It is completed automatically
+              when the suggestion raised for them is added or mapped.
+            </p>
+          )}
           <PreviewPanel
             groups={[
               {
@@ -87,10 +108,13 @@ export function StudentDetailPanel({
               {
                 title: 'College and course',
                 items: [
-                  { label: 'College', value: student.college },
-                  { label: 'Campus', value: student.campus },
+                  { label: 'College', value: checked(student, 'college', student.college) },
+                  { label: 'Campus', value: checked(student, 'campus', student.campus) },
                   { label: 'State', value: student.state ?? '—', generated: true },
-                  { label: 'Qualification Code', value: student.qualification_code },
+                  {
+                    label: 'Qualification Code',
+                    value: checked(student, 'qualification', student.qualification_code),
+                  },
                   { label: 'Qualification Title', value: student.qualification_title },
                   { label: 'CoE / Non-CoE', value: student.coe_status === 'COE' ? 'CoE' : 'Non-CoE' },
                   { label: 'CT Student', value: student.ct_student ? 'Yes' : 'No' },

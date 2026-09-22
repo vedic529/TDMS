@@ -17,6 +17,9 @@ from app.models.qualification import Qualification, Unit
 from app.models.trainer import Trainer
 from app.services.allocation_profiles import ALLOCATION_COLUMNS
 
+#: The spreadsheet download is one file, not a paged view.
+_EXPORT_LIMIT = 100_000
+
 WEEKDAY_LABEL = {
     "MONDAY": "Monday",
     "TUESDAY": "Tuesday",
@@ -66,18 +69,19 @@ def _approved(lookup: dict, key: int | None, attribute: str, fallback: str | Non
     return fallback or ""
 
 
-def export_workbook(session: Session, *, training_package: str, start_date: dt.date, end_date: dt.date) -> tuple[str, bytes]:
+def export_workbook(session: Session, *, training_package: str, start_date: dt.date, end_date: dt.date | None) -> tuple[str, bytes]:
     package = training_package.upper()
+    conditions = [
+        AllocationDelivery.training_package == package,
+        AllocationDelivery.end_date >= start_date,
+        AllocationDelivery.is_quarantined.is_(False),
+    ]
+    if end_date is not None:
+        conditions.append(AllocationDelivery.start_date <= end_date)
     deliveries = list(
         session.execute(
             select(AllocationDelivery)
-            .where(
-                AllocationDelivery.training_package == package,
-                AllocationDelivery.start_date <= end_date,
-                AllocationDelivery.end_date >= start_date,
-                # A quarantined delivery is never exported.
-                AllocationDelivery.is_quarantined.is_(False),
-            )
+            .where(*conditions)
             .order_by(AllocationDelivery.start_date, AllocationDelivery.id)
         ).scalars()
     )
@@ -112,8 +116,6 @@ def export_workbook(session: Session, *, training_package: str, start_date: dt.d
         def room(row: AllocationSession) -> str:
             if row.virtual_kind == "FACE_TO_FACE_VC":
                 return "Face to Face VC"
-            if row.virtual_kind == "FACE_TO_FACE_VIRTUAL":
-                return "Face to Face Virtual"
             if row.facility_id and row.facility_id in facilities:
                 return facilities[row.facility_id].facility_reference
             return row.classroom_text or ""
@@ -172,3 +174,168 @@ def _xlsx(headers: list[str], rows: list[list[str]]) -> tuple[str, bytes]:
     buffer = io.BytesIO()
     book.save(buffer)
     return "allocation.xlsx", buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# The spreadsheet view, downloaded (approved 21 September 2026)
+# ---------------------------------------------------------------------------
+
+#: The spreadsheet view's columns, in its order. One list, so the screen and the
+#: download cannot drift apart.
+SPREADSHEET_COLUMNS = (
+    "Sl No.",
+    "College",
+    "Campus",
+    "Qualification Code",
+    "Qualification Title",
+    "Duration in weeks",
+    "Group",
+    "Linked Intakes",
+    "Total students attending",
+    "COE students",
+    "Non-COE students",
+    "Units of Competency ID",
+    "Units of Competency Title",
+    "Unit of Competency Start Date",
+    "Unit of Competency End Date",
+    "UoC Type",
+    "Mode of Delivery",
+    "Theory Class Days and Times",
+    "Theory Classroom Name",
+    "Theory Classroom Capacity",
+    "Theory Trainer",
+    "Practical Classroom Name",
+    "Practical Class Capacity",
+    "Practical Class Days and Times",
+    "Practical Trainers",
+)
+
+EMPTY = "—"
+
+
+def _friendly(value: str) -> str:
+    """`THEORY_ONLY` reads as `Theory Only`, exactly as the screen shows it."""
+    return " ".join(part.capitalize() for part in str(value or "").split("_"))
+
+
+def _stacked(values: list[str], empty: str = EMPTY) -> str:
+    """Several values in one cell, one per line — the screen stacks them."""
+    seen = list(dict.fromkeys(values))
+    return "\n".join(seen) if seen else empty
+
+
+def _session_values(items: list[dict], field: str, empty: str = EMPTY) -> str:
+    values = []
+    for item in items:
+        if field == "schedule":
+            values.append(f"{_friendly(item['weekday'])} · {item['start_time']}–{item['end_time']}")
+        elif field == "classroom":
+            values.append(item["classroom"] or EMPTY)
+        elif field == "capacity":
+            capacity = item["classroom_capacity"]
+            values.append(
+                str(capacity) if capacity is not None else ("Virtual" if item["delivery_mode"] == "VIRTUAL" else EMPTY)
+            )
+        else:
+            values.append(item["trainer"] or EMPTY)
+    return _stacked(values, empty)
+
+
+def export_spreadsheet(
+    session: Session,
+    *,
+    training_package: str,
+    start_date: dt.date,
+    end_date: dt.date | None,
+    file_format: str = "xlsx",
+) -> tuple[str, bytes, str]:
+    """The allocation spreadsheet exactly as the screen shows it.
+
+    Reads the same service the view reads, so the columns, the order and the
+    wording are the screen's - not a second layout that drifts from it. Returns
+    (file name, bytes, media type).
+    """
+    from app.services import allocation_spreadsheet
+
+    package = training_package.upper()
+    page = allocation_spreadsheet.list_rows(
+        session,
+        training_package=package,
+        start_date=start_date,
+        end_date=end_date,
+        limit=_EXPORT_LIMIT,
+        offset=0,
+    )
+
+    rows: list[list[str]] = []
+    for item in page["items"]:
+        theory = [row for row in item["sessions"] if row["stream"] == "THEORY"]
+        practical = [row for row in item["sessions"] if row["stream"] == "PRACTICAL"]
+        rows.append(
+            [
+                str(item["sl_no"]),
+                item["college"] or EMPTY,
+                item["campus"] or EMPTY,
+                item["qualification_code"] or EMPTY,
+                item["qualification_title"] or EMPTY,
+                str(item["duration_weeks"]),
+                item["group"] or EMPTY,
+                _stacked(list(item["intakes"])),
+                str(item["total_students"]),
+                str(item["coe_students"]),
+                str(item["non_coe_students"]),
+                item["unit_code"] or EMPTY,
+                item["unit_title"] or EMPTY,
+                item["unit_start_date"].isoformat(),
+                item["unit_end_date"].isoformat(),
+                _friendly(item["uoc_type"]),
+                item["mode_of_delivery"] or EMPTY,
+                _session_values(theory, "schedule"),
+                _session_values(theory, "classroom"),
+                _session_values(theory, "capacity"),
+                _session_values(theory, "trainer"),
+                _session_values(practical, "classroom"),
+                _session_values(practical, "capacity"),
+                _session_values(
+                    practical, "schedule", "Not required" if item["uoc_type"] == "THEORY_ONLY" else EMPTY
+                ),
+                _session_values(practical, "trainer"),
+            ]
+        )
+
+    stamp = dt.date.today().isoformat()
+    if file_format == "csv":
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(SPREADSHEET_COLUMNS)
+        writer.writerows(rows)
+        return (
+            f"allocation-records-{package}-{stamp}.csv",
+            buffer.getvalue().encode("utf-8-sig"),
+            "text/csv",
+        )
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Allocation Records"
+    sheet.append(list(SPREADSHEET_COLUMNS))
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        sheet.append(row)
+    # The screen stacks several values in a cell; the workbook must show them
+    # the same way rather than running them together on one line.
+    for line in sheet.iter_rows(min_row=2):
+        for cell in line:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    sheet.freeze_panes = "A2"
+    output = io.BytesIO()
+    book.save(output)
+    return (
+        f"allocation-records-{package}-{stamp}.xlsx",
+        output.getvalue(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )

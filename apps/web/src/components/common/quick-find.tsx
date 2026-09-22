@@ -15,7 +15,8 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { EmptyState } from './states';
-import { getTdmsClient } from '@/services';
+import { referenceApi } from '@/services/reference-api';
+import { toCourseRecord } from '@/features/reference-data/reference-adapters';
 import { studentsApi } from '@/services/students-api';
 import { INTERFACE_NAMES } from '@/lib/interface-names';
 
@@ -72,12 +73,11 @@ export function QuickFind() {
 
     const timer = setTimeout(() => {
       void (async () => {
-        const client = getTdmsClient();
-        // Students come from the database; courses still go through the client.
-        const [students, courses] = await Promise.all([
+        const [students, courseRows] = await Promise.all([
           studentsApi.list({ search: value, limit: 5 }).catch(() => ({ items: [] })),
-          client.listCourses({ search: value }),
+          referenceApi.listCourses({ search: value }),
         ]);
+        const courses = courseRows.map(toCourseRecord);
         if (cancelled) return;
 
         const found: QuickFindResult[] = [

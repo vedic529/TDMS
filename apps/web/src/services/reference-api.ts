@@ -4,15 +4,8 @@ import { getAuthProvider } from './auth';
 /**
  * College and Course Reference Data — the real API client (Step 6).
  *
- * **This module always calls FastAPI.** It does not consult
- * `NEXT_PUBLIC_TDMS_DATA_MODE`, and it has no mock fallback: an empty real
- * database must produce an empty interface, never demo records dressed up as
- * real ones. A failure surfaces as an error the page shows, because quietly
- * substituting mock data would be worse than saying nothing loaded.
- *
- * It sits beside `TdmsClient` rather than inside it so one module can be real
- * while Student, Trainer and Timetable stay on the transitional mock service.
- * Those modules migrate in their own steps; nothing here breaks them.
+ * This module always calls FastAPI. An empty database produces an empty
+ * interface, and a failed request is shown as an error.
  *
  * The bearer token is attached in one place, `request()`, from the same MSAL
  * session the rest of the application uses.
@@ -45,6 +38,79 @@ export interface ApiCollegeCampus {
   college_id: number;
   campus_id: number;
   is_active: boolean;
+}
+
+/** A city in the City Dictionary, with the campuses located in it. */
+export interface ApiCity {
+  id: number;
+  city_name: string;
+  state: string;
+  is_active: boolean;
+  campuses: Array<{ id: number; campus_code: string; campus_name: string; state: string }>;
+}
+
+export interface CityWrite {
+  city_name: string;
+  state: string;
+  /** The campuses located in the city. Each must be in its state. */
+  campus_ids: number[];
+}
+
+/**
+ * One entry in the Campus Address Dictionary (approved 16 September 2026): a
+ * full address is identified by college + campus, because one campus name can
+ * be a different building for each college.
+ */
+export interface ApiCampusAddress {
+  college_id: number;
+  college_short_name: string;
+  campus_id: number;
+  campus_code: string;
+  campus_name: string;
+  state: string;
+  /** `null` for a combination approved before the dictionary. */
+  address: string | null;
+  is_active: boolean;
+}
+
+export interface CampusAddressWrite {
+  college_id: number;
+  campus_id: number;
+  address: string;
+}
+
+/** Everything the site knows about one course record (21 September 2026). */
+export interface ApiCourseDetail {
+  id: number;
+  course_code: string;
+  college_short_name: string;
+  college_full_name: string;
+  campus_name: string;
+  campus_code: string;
+  state: string;
+  /** The Campus Address Dictionary entry for this college at this campus. */
+  address: string | null;
+  address_is_from_dictionary: boolean;
+  city: string | null;
+  campus_source_addresses: string[];
+  qualification_code: string | null;
+  qualification_title: string;
+  course_level: string | null;
+  field_of_education_broad: string | null;
+  field_of_education_narrow: string | null;
+  course_sector: string | null;
+  source_url: string | null;
+  course_status_label: string;
+  course_status_code: string;
+  total_course_cost: number | string | null;
+  duration_options: number[];
+  students: { total: number; coe: number; non_coe: number };
+  intakes: Array<{ intake_label: string; students: number }>;
+  /** Timetable rows stored for this qualification at this college and campus. */
+  classes: number;
+  /** Approved rooms this college may use at this campus. */
+  rooms: number;
+  is_deleted: boolean;
 }
 
 export interface ApiQualification {
@@ -328,6 +394,23 @@ export const referenceApi = {
       `/reference/colleges${query({ search: params.search, active_only: params.activeOnly })}`,
     ),
   getCollege: (id: number) => request<ApiCollege>(`/reference/colleges/${id}`),
+
+  // ------------------------------------------------------- city dictionary
+  listCities: () => request<ApiCity[]>('/reference/cities'),
+  createCity: (body: CityWrite) =>
+    request<ApiCity>('/reference/cities', { method: 'POST', body: JSON.stringify(body) }),
+  updateCity: (id: number, body: CityWrite) =>
+    request<ApiCity>(`/reference/cities/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  // ---------------------------------------------- campus address dictionary
+  listCampusAddresses: () => request<ApiCampusAddress[]>('/reference/campus-addresses'),
+  createCampusAddress: (body: CampusAddressWrite) =>
+    request<ApiCampusAddress>('/reference/campus-addresses', { method: 'POST', body: JSON.stringify(body) }),
+  updateCampusAddress: (body: CampusAddressWrite) =>
+    request<ApiCampusAddress>(`/reference/campus-addresses/${body.college_id}/${body.campus_id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   createCollege: (body: Partial<ApiCollege>) =>
     request<ApiCollege>('/reference/colleges', { method: 'POST', body: JSON.stringify(body) }),
   updateCollege: (id: number, body: Partial<ApiCollege>) =>
@@ -491,6 +574,8 @@ export const referenceApi = {
       })}`,
     ),
   getCourse: (id: number) => request<ApiCourse>(`/reference/courses/${id}`),
+  /** The side panel's record: address, city, enrolment and classes. */
+  getCourseDetail: (id: number) => request<ApiCourseDetail>(`/reference/courses/${id}/detail`),
   createCourse: (body: {
     college_id: number;
     campus_id: number;

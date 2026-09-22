@@ -24,6 +24,7 @@ import {
   type ApiCollegeCampus,
   type ApiQualification,
 } from '@/services/reference-api';
+import { plain as plainText } from '@/features/shared/suggestion-prefill';
 
 /**
  * AQF levels, as stored. Not derived from the title: only 55 of 79 stored
@@ -72,7 +73,12 @@ interface CourseFormDialogProps {
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
   /** From a suggestion: the value seen, as a VET code or as a title. */
-  prefill?: { vetCode?: string; title?: string } | null;
+  prefill?: {
+    vetCode?: string;
+    title?: string;
+    /** Where the raising rows taught it: a college and campus as spelled there, and a duration. */
+    locations?: Array<{ college?: string; campus?: string; durationWeeks?: string }>;
+  } | null;
   /** The qualification, so a suggestion can be resolved onto it. */
   onCreated?: (qualificationId: number) => void;
 }
@@ -140,6 +146,34 @@ export function CourseFormDialog({
         setCampuses(campusRows);
         setQualifications(qualificationRows);
         setStatusId(statuses[0]?.id ?? null);
+
+        // From a suggestion: the places the raising rows taught it. A college
+        // that does not resolve is left out rather than guessed, and a campus
+        // that does not resolve leaves its row for the campus to be chosen.
+        const seenPlaces = new Map<string, LocationRow>();
+        for (const place of prefill?.locations ?? []) {
+          const collegeKey = plainText(place.college);
+          const college = collegeRows.find(
+            (row) => plainText(row.college_short_name) === collegeKey || plainText(row.college_full_name) === collegeKey,
+          );
+          if (!college) continue;
+          const campusKey = plainText(place.campus);
+          const campus = campusRows.find(
+            (row) =>
+              linkRows.some((link) => link.college_id === college.id && link.campus_id === row.id) &&
+              (plainText(row.campus_name) === campusKey ||
+                plainText(row.campus_location) === campusKey ||
+                (row.source_addresses ?? []).some((spelling) => plainText(spelling) === campusKey)),
+          );
+          const entry: LocationRow = {
+            ...EMPTY_LOCATION,
+            collegeId: String(college.id),
+            campusId: campus ? String(campus.id) : '',
+            durationWeeks: place.durationWeeks ?? '',
+          };
+          seenPlaces.set(`${entry.collegeId}|${entry.campusId}|${entry.durationWeeks}`, entry);
+        }
+        if (seenPlaces.size > 0) setPlaces(Array.from(seenPlaces.values()));
       } catch {
         if (!cancelled) toast.error('The reference lists could not be loaded');
       }

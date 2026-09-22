@@ -236,10 +236,25 @@ def test_p4_bad_date_refuses_the_row(db):
     assert any("Proposed Start Date" in i["field_name"] for i in row["issues"])
 
 
-def test_p5_end_before_start_refuses(db):
+def test_p5_end_before_start_is_a_rule_that_can_be_accepted(db):
+    """Amended 15 September 2026: a broken rule, so accepted, excluded or corrected."""
     batch = _stage(db, [_row(**{"Proposed Start Date": "19-04-2026", "Proposed End Date": "09-02-2026"})])
     row = _row_by_source(_review(db, batch), 2)
     assert row["status"] == "NEEDS_CORRECTION"
+    assert any(issue["issue_status"] == "EXCEPTION" for issue in row["issues"])
+
+    imp.patch_rows(db, batch, [_patch(row["id"], accept_exception=True)])
+    db.commit()
+    assert _row_by_source(_review(db, batch), 2)["status"] == "READY"
+    imp.patch_rows(db, batch, [_patch(row["id"], accept_exception=False)])
+    db.commit()
+    assert _row_by_source(_review(db, batch), 2)["status"] == "NEEDS_CORRECTION", "Undo asks again"
+
+    imp.patch_rows(db, batch, [_patch(row["id"], accept_exception=True)])
+    db.commit()
+    assert _apply(db, batch)["inserted"] == 1
+    student = db.execute(select(Student)).scalar_one()
+    assert student.proposed_end_date < student.proposed_start_date, "stored as written"
 
 
 def test_p6_duration_is_derived_not_read(db):
@@ -525,20 +540,80 @@ def test_r3_unmatched_raises_one_suggestion(db):
     row_id = _row_by_source(_review(db, batch), 2)["id"]
     imp.patch_rows(db, batch, [_patch(row_id, reference_entity="college", reference_choice="RAISE")])
     db.commit()
-    _apply(db, batch)
+    result = _apply(db, batch)
     from app.models.allocation import ReferenceSuggestion
 
     suggestions = db.execute(select(ReferenceSuggestion).where(ReferenceSuggestion.source == "STUDENT_IMPORT")).scalars().all()
     assert len(suggestions) == 1 and suggestions[0].entity_type == "COLLEGE"
+    # Amended 15 September 2026: the raised row is stored unverified, not dropped.
+    assert result["inserted"] == 1 and result["unverified"] == 1
+    student = db.execute(select(Student)).scalar_one()
+    assert student.course_offering_id is None
+    assert student.college_text == "Nowhere College"
 
 
-def test_r4_exception_stores_nothing_extra(db):
+def test_r4_an_exception_is_not_offered_for_an_unmatched_value(db):
+    """Amended 15 September 2026: EXCEPT is not honoured - the row still blocks."""
     batch = _stage(db, [_row(**{"College": "Nowhere"})])
     row_id = _row_by_source(_review(db, batch), 2)["id"]
     imp.patch_rows(db, batch, [_patch(row_id, reference_entity="college", reference_choice="EXCEPT")])
     db.commit()
-    result = _apply(db, batch)
-    assert result["suggestions_raised"] == 0 and result["inserted"] == 0
+    assert _row_by_source(_review(db, batch), 2)["status"] == "UNMATCHED_REFERENCE"
+
+
+def test_r4b_resolving_the_suggestion_completes_the_student(db):
+    """An unverified student gains its offering, email and intake when the value resolves."""
+    from app.models.allocation import ReferenceSuggestion
+    from app.services import reference_suggestion_service as suggestions
+
+    ids = db.info["ids"]
+    batch = _stage(db, [_row(**{"College": "Nowhere College"})])
+    row_id = _row_by_source(_review(db, batch), 2)["id"]
+    imp.patch_rows(db, batch, [_patch(row_id, reference_entity="college", reference_choice="RAISE")])
+    db.commit()
+    _apply(db, batch)
+
+    listed, total = student_service.list_students(db, unverified=True)
+    assert total == 1
+    assert listed[0]["is_unverified"] is True
+    assert listed[0]["unverified_fields"] == ["college"]
+    assert listed[0]["college"] == "Nowhere College", "what the file said is shown"
+
+    entry = db.execute(select(ReferenceSuggestion)).scalar_one()
+    _resolved, updated = suggestions.resolve_suggestion(
+        db, _user(db), suggestion_id=entry.id, action="MAP", resolved_entity_id=ids["college"]
+    )
+    db.commit()
+    assert updated >= 1
+
+    student = db.execute(select(Student)).scalar_one()
+    assert student.course_offering_id == ids["offering"]
+    assert student.college_text == COLLEGE, "the spelling is corrected everywhere"
+    assert student.college_email == f"s001@{DOMAIN}"
+    assert student.intake_match_status == "MATCHED"
+    assert student_service.list_students(db, unverified=True)[1] == 0
+
+
+def test_r4c_a_combination_no_offering_holds_is_a_qualification_suggestion(db):
+    """All three values resolve but nothing offers them together: raised, not a dead end."""
+    from app.models.allocation import ReferenceSuggestion
+
+    db.add(Qualification(qualification_code="CHC33021", qualification_title="Cert III Individual Support", is_active=True))
+    db.commit()
+    batch = _stage(db, [_row(**{"Qualification": "CHC33021"})])
+    row = _row_by_source(_review(db, batch), 2)
+    assert row["status"] == "UNMATCHED_REFERENCE"
+    assert any(issue["field_name"] == "Qualification" and issue["issue_status"] == "BLOCK" for issue in row["issues"])
+
+    imp.patch_rows(db, batch, [_patch(row["id"], reference_entity="qualification", reference_choice="RAISE")])
+    db.commit()
+    assert _row_by_source(_review(db, batch), 2)["status"] == "READY"
+    _apply(db, batch)
+
+    entry = db.execute(select(ReferenceSuggestion)).scalar_one()
+    assert entry.entity_type == "QUALIFICATION"
+    assert entry.attributes == {"locations": [{"college": COLLEGE, "campus": CAMPUS}]}
+    assert db.execute(select(Student)).scalar_one().course_offering_id is None
 
 
 def test_r5_resolve_inline_clears_issue(db):
@@ -675,3 +750,212 @@ def _patch(row_id, **kw):
     if corrections is not None:
         corrections = [RowCorrection(column=c, value=v) for c, v in corrections]
     return RowPatch(row_id=row_id, corrections=corrections, **kw)
+
+
+def test_rejecting_a_value_deletes_its_unverified_students_the_approved_way(db):
+    """DATA-04 holds however the deletion was decided: a reason, and a way back.
+
+    Approved 16 September 2026: Reject removes what carries an unapproved value.
+    A student is never hard-deleted, so the decision is refused until a reason is
+    given, and the record stays recoverable for the recycle period.
+    """
+    import pytest
+
+    from app.models.allocation import ReferenceSuggestion
+    from app.services import reference_suggestion_service as suggestions
+    from app.services.allocation_import import AllocationImportError
+
+    batch = _stage(db, [_row(**{"College": "Rejected College"})])
+    row_id = _row_by_source(_review(db, batch), 2)["id"]
+    imp.patch_rows(db, batch, [_patch(row_id, reference_entity="college", reference_choice="RAISE")])
+    db.commit()
+    _apply(db, batch)
+
+    entry = db.execute(select(ReferenceSuggestion)).scalar_one()
+    with pytest.raises(AllocationImportError) as refused:
+        suggestions.resolve_suggestion(db, _user(db), suggestion_id=entry.id, action="REJECT")
+    assert "deletion reason" in str(refused.value)
+    assert db.execute(select(Student)).scalar_one().is_deleted is False, "nothing went without a reason"
+
+    suggestions.resolve_suggestion(
+        db,
+        _user(db),
+        suggestion_id=entry.id,
+        action="REJECT",
+        reason_code="ENTERED_IN_ERROR",
+    )
+    db.commit()
+    student = db.execute(select(Student)).scalar_one()
+    assert student.is_deleted is True
+    assert student.recovery_deadline is not None
+    assert student.delete_reason_id is not None
+    assert "Rejected College" in (student.delete_reason_detail or "")
+
+
+# ===========================================================================
+# Clearing the student records (approved 21 September 2026)
+# ===========================================================================
+
+
+def test_applying_an_import_drops_its_staged_copy_of_the_file(db):
+    """The staged rows hold names, emails and phones and are reachable from
+    nowhere once the import finishes, so they go. The batch row stays."""
+    from app.models.import_batch import ImportBatch, ImportStagedRow
+
+    batch = _stage(db, [_row()])
+    assert db.execute(select(func.count()).select_from(ImportStagedRow)).scalar_one() == 1
+
+    _apply(db, batch)
+
+    assert db.execute(select(func.count()).select_from(ImportStagedRow)).scalar_one() == 0
+    kept = db.execute(select(ImportBatch)).scalar_one()
+    assert kept.status == "APPLIED" and kept.inserted_count == 1, "the upload record survives"
+    assert db.execute(select(func.count()).select_from(Student)).scalar_one() == 1
+
+
+def test_clearing_removes_every_student_its_intake_and_the_import_copies(db):
+    """Super Admin's Clear Database: nothing student-shaped is left behind."""
+    from app.models.import_batch import ImportBatch, ImportStagedRow
+    from app.services import student_maintenance as maintenance
+
+    _apply(db, _stage(db, [_row(), _row(**{"Student ID": "S002", "First Name": "Bob"})]))
+    # A soft-deleted student: "no deleted record left" covers the recycle area.
+    student = db.execute(select(Student).order_by(Student.id)).scalars().first()
+    student_service.delete_student(
+        db, _user(db), student.id, reason_code_id=db.info["ids"]["reason"], reason_detail="test"
+    )
+    db.commit()
+    # An upload someone opened and never finished.
+    _stage(db, [_row(**{"Student ID": "S003", "First Name": "Cara"})])
+
+    preview = maintenance.clear_preview(db)
+    assert preview["students"] == 1 and preview["deleted_students"] == 1
+    assert preview["intakes"] >= 1
+    assert preview["import_batches"] == 2, "the applied one and the abandoned one"
+    assert preview["staged_rows"] == 1, "only the unfinished upload still holds rows"
+
+    removed = maintenance.clear_student_records(db, _user(db))
+    db.commit()
+
+    assert removed["students"] == 1 and removed["deleted_students"] == 1
+    assert db.execute(select(func.count()).select_from(Student)).scalar_one() == 0
+    assert db.execute(select(func.count()).select_from(StudentGroup)).scalar_one() == 0
+    assert db.execute(select(func.count()).select_from(ImportBatch)).scalar_one() == 0
+    assert db.execute(select(func.count()).select_from(ImportStagedRow)).scalar_one() == 0
+    # The rolling timetable says what each intake studies and is not student data.
+    assert db.execute(select(func.count()).select_from(RollingTimetableWeek)).scalar_one() > 0
+
+
+def test_clearing_closes_the_suggestions_its_records_were_behind(db):
+    """An entry exists only while a stored row still carries its value."""
+    from app.models.allocation import ReferenceSuggestion
+    from app.services import student_maintenance as maintenance
+
+    batch = _stage(db, [_row(**{"College": "Unknown College"})])
+    row_id = _row_by_source(_review(db, batch), 2)["id"]
+    imp.patch_rows(db, batch, [_patch(row_id, reference_entity="college", reference_choice="RAISE")])
+    db.commit()
+    _apply(db, batch)
+    entry = db.execute(select(ReferenceSuggestion)).scalars().one()
+    assert entry.status == "PENDING"
+
+    removed = maintenance.clear_student_records(db, _user(db))
+    db.commit()
+
+    assert removed["suggestions"] == 1
+    assert db.execute(select(func.count()).select_from(ReferenceSuggestion)).scalar_one() == 0
+
+
+def test_clearing_leaves_a_trainer_import_alone(db):
+    """Trainer imports share these tables; only student batches belong here."""
+    from app.models.import_batch import ImportBatch
+    from app.services import student_maintenance as maintenance
+
+    _apply(db, _stage(db, [_row()]))
+    trainer_batch = ImportBatch(
+        batch_reference="TRN-1", file_name="trainers.xlsx", uploaded_at=dt.datetime.now(dt.timezone.utc),
+        uploaded_by_user_id=_user(db).id, row_count=3, status="STAGED", data_type="UNITS",
+    )
+    db.add(trainer_batch)
+    db.commit()
+
+    maintenance.clear_student_records(db, _user(db))
+    db.commit()
+
+    kept = db.execute(select(ImportBatch)).scalars().all()
+    assert [row.data_type for row in kept] == ["UNITS"]
+
+
+def test_a_campus_spelling_is_decided_per_college(db):
+    """Approved 21 September 2026.
+
+    "Sydney (Haymarket)" is one place at one college and another somewhere else,
+    so a campus entry names its college and repairs only that college's rows.
+    Mapping one college's entry must not reach the other's students.
+    """
+    from app.models.allocation import ReferenceSuggestion
+    from app.services import reference_suggestion_service as suggestions
+
+    ids = db.info["ids"]
+    other_college = College(
+        college_short_name="REACH", college_full_name="REACH College", email_domain="reach.edu.au", is_active=True
+    )
+    other_campus = Campus(
+        campus_code="BLK", campus_name="Blacktown", campus_location="Blacktown", state="NSW", is_active=True
+    )
+    db.add_all([other_college, other_campus])
+    db.flush()
+    db.add(CollegeCampus(college_id=other_college.id, campus_id=other_campus.id, is_active=True))
+    status_id = db.execute(text("SELECT id FROM course_statuses LIMIT 1")).scalar_one()
+    db.add(
+        CourseOffering(
+            college_id=other_college.id, campus_id=other_campus.id, qualification_id=ids["qual"],
+            course_code="BSB50420-BLK", course_status_id=status_id,
+        )
+    )
+    db.commit()
+
+    unknown = "Sydney (Haymarket)"
+    batch = _stage(
+        db,
+        [
+            _row(**{"Campus": unknown}),
+            _row(**{"Student ID": "S002", "First Name": "Bob", "College": "REACH", "Campus": unknown}),
+        ],
+    )
+    review = _review(db, batch)
+    imp.patch_rows(
+        db,
+        batch,
+        [
+            _patch(_row_by_source(review, 2)["id"], reference_entity="campus", reference_choice="RAISE"),
+            _patch(_row_by_source(review, 3)["id"], reference_entity="campus", reference_choice="RAISE"),
+        ],
+    )
+    db.commit()
+    _apply(db, batch)
+
+    entries = db.execute(
+        select(ReferenceSuggestion).where(ReferenceSuggestion.entity_type == "CAMPUS")
+    ).scalars().all()
+    assert len(entries) == 2, "one entry per college, not one shared entry"
+    by_college = {(entry.context or {}).get("college"): entry for entry in entries}
+    assert set(by_college) == {COLLEGE, "REACH"}
+    for entry in entries:
+        assert suggestions.unresolved_total(db, "CAMPUS", entry.normalised_value, entry.context) == 1
+
+    # Map only AIBT's entry, to AIBT's own campus.
+    suggestions.resolve_suggestion(
+        db, _user(db), suggestion_id=by_college[COLLEGE].id, action="MAP", resolved_entity_id=ids["campus"]
+    )
+    db.commit()
+
+    students = {row.student_id: row for row in db.execute(select(Student)).scalars()}
+    assert students["S001"].course_offering_id == ids["offering"], "AIBT's student is completed"
+    assert students["S001"].campus_text == CAMPUS, "and its spelling corrected"
+    assert students["S002"].course_offering_id is None, "REACH's student is untouched"
+    assert students["S002"].campus_text == unknown
+
+    reach = db.get(ReferenceSuggestion, by_college["REACH"].id)
+    assert reach.status == "PENDING"
+    assert suggestions.unresolved_total(db, "CAMPUS", reach.normalised_value, reach.context) == 1

@@ -62,6 +62,9 @@ def update_session(
     end_time: dt.time,
     classroom: str | None,
     trainer: str | None,
+    facility_id: int | None = None,
+    trainer_id: int | None = None,
+    log: bool = True,
 ) -> AllocationSession:
     row = _session_row(session, session_id, training_package)
     weekday = weekday.upper()
@@ -96,11 +99,11 @@ def update_session(
         row.delivery_mode = "VIRTUAL"
         row.facility_id = None
         row.virtual_kind = virtual_kind
-        row.classroom_text = classroom
+        row.classroom_text = rules.CANONICAL_VIRTUAL_CLASSROOM
         changes.append(f"classroom → {classroom}")
     elif classroom:
-        facility = session.execute(
-            select(Facility).where(func.upper(Facility.facility_reference) == classroom.strip().upper())
+        facility = session.get(Facility, facility_id) if facility_id is not None else session.execute(
+            select(Facility).where(func.upper(Facility.facility_reference) == classroom.strip().upper()).limit(1)
         ).scalar_one_or_none()
         if facility:
             row.facility_id = facility.id
@@ -121,7 +124,9 @@ def update_session(
             _upsert_suggestions(session, suggestions, dt.datetime.now(dt.timezone.utc))
         changes.append(f"classroom → {classroom}")
     if trainer is not None:
-        found = session.execute(select(Trainer).where(Trainer.trainer_name == trainer)).scalar_one_or_none()
+        found = session.get(Trainer, trainer_id) if trainer_id is not None else session.execute(
+            select(Trainer).where(Trainer.trainer_name == trainer)
+        ).scalar_one_or_none()
         if row.stream == "MSCRIS":
             row.trainer_id = None
             row.trainer_text = trainer or None
@@ -140,6 +145,8 @@ def update_session(
     warning = ""
     if teaching != rules.TEACHING_DAYS_PER_WEEK:
         warning = f" This unit now runs on {teaching} teaching day(s) a week."
+    if not log:
+        return row
     record_activity(
         session,
         user=user,
@@ -150,6 +157,67 @@ def update_session(
         result="COMPLETED",
     )
     return row
+
+
+def update_mscris_group(
+    session: Session,
+    user: User,
+    *,
+    session_ids: list[int],
+    training_package: str,
+    start_time: dt.time,
+    end_time: dt.time,
+    classroom: str | None,
+    trainer: str | None,
+) -> int:
+    """Edit a merged MSCRIS entry: every class day it covers changes together.
+
+    Approved 17 September 2026. The entry is one class, so its time, classroom
+    and trainer cannot differ between the units it covers. The caller's
+    transaction makes it all or nothing: one refusal leaves every class day as it was.
+    """
+    ids = sorted(set(session_ids))
+    rows = list(
+        session.execute(
+            select(AllocationSession).where(
+                AllocationSession.id.in_(ids),
+                AllocationSession.training_package == training_package.upper(),
+            )
+        ).scalars()
+    )
+    if len(rows) != len(ids):
+        raise AllocationEditError("Some of these MSCRIS class days were not found. Reload and try again.")
+    if any(row.stream != "MSCRIS" for row in rows):
+        raise AllocationEditError("Only MSCRIS class days can be edited together.")
+    for row in rows:
+        update_session(
+            session,
+            user,
+            session_id=row.id,
+            training_package=training_package,
+            weekday=row.weekday,
+            start_time=start_time,
+            end_time=end_time,
+            classroom=classroom,
+            trainer=trainer,
+            log=False,
+        )
+    record_activity(
+        session,
+        user=user,
+        action="UPDATE",
+        page_or_function="Page 1 - Timetable View and Management",
+        detail=(
+            f"Updated an MSCRIS class covering {len(rows)} class day(s): "
+            f"time {start_time:%H:%M}–{end_time:%H:%M}"
+            + (f"; classroom → {classroom}" if classroom else "")
+            + (f"; trainer → {trainer or 'unallocated'}" if trainer is not None else "")
+            + "."
+        ),
+        record_reference=",".join(str(row.id) for row in rows)[:500],
+        result="COMPLETED",
+    )
+    return len(rows)
 
 
 def add_session(
@@ -184,8 +252,12 @@ def add_session(
         end_time=end_time,
         delivery_mode=mode,
         facility_id=None,
-        virtual_kind=virtual_kind or ("FACE_TO_FACE_VIRTUAL" if stream == "MSCRIS" else None),
-        classroom_text=classroom,
+        virtual_kind=virtual_kind or ("FACE_TO_FACE_VC" if stream == "MSCRIS" else None),
+        classroom_text=(
+            rules.CANONICAL_VIRTUAL_CLASSROOM
+            if virtual_kind or stream == "MSCRIS"
+            else classroom
+        ),
         trainer_id=None,
         trainer_text=trainer,
     )

@@ -143,7 +143,7 @@ export function UserMenu() {
                     { label: 'Correlation ID', value: session?.correlationId ?? '—' },
                     {
                       label: 'Authentication adapter',
-                      value: session?.provider === 'entra' ? 'Microsoft Entra ID' : 'Development (mock) adapter',
+                      value: 'Microsoft Entra ID',
                     },
                     { label: 'Environment', value: env.appEnvironment },
                   ],

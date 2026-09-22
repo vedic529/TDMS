@@ -6,11 +6,12 @@ derivation and duplicate detection all run in **bulk** — one query for the
 rolling timetable, one for existing students, one lookup load per import — so a
 thousand-row file does not issue a thousand queries (rule 2.9).
 
-Unresolved College / Campus / Qualification is handled the strict way the
-approved `students` schema requires: a student is defined by its course offering
-(course_offering_id NOT NULL, DATA-02), so an unresolved reference cannot be
-written. It blocks the confirmation until the user resolves it inline, raises a
-suggestion, or accepts it as an exception (which drops the row).
+An unresolved College / Campus / Qualification - or a combination no approved
+course offering holds - blocks the confirmation until the user corrects it,
+resolves it inline, or raises a suggestion (approved 15 September 2026). A raised
+row is **stored unverified**: `course_offering_id` stays NULL, the three values
+are kept as written, and the student is completed when the suggestion resolves.
+There is no exception path: an unmatched value is never waved through.
 """
 
 from __future__ import annotations
@@ -315,6 +316,9 @@ class _Eval:
     # an unresolved reference raised or excepted, or a same-qualification
     # duplicate resolved by keeping the stored record.
     force_excluded: bool = False
+    # A reference was raised as a suggestion: the row is written with no
+    # offering, keeping its values as text until the suggestion resolves.
+    unverified: bool = False
     row_status: str = READY
     issues: list[_Issue] = field(default_factory=list)
 
@@ -357,31 +361,61 @@ def _resolve_references(values: dict, lookups: Lookups, row: ImportStagedRow, ev
     elif qual_raw:
         _reference_issue(row, ev, "qualification", C_QUAL, qual_raw, "Qualification is not an approved record.")
 
-    # Offering — needs all three. A missing offering is a correction, not a
-    # single-entity suggestion.
+    # Offering — needs all three. A combination no approved offering holds is an
+    # unmatched value like any other (15 September 2026): raised as a
+    # qualification suggestion, whose Add places the qualification at this
+    # college and campus.
     if ev.college_id and ev.campus_id and ev.qualification_id:
         ev.offering_id = lookups.offering.get((ev.college_id, ev.campus_id, ev.qualification_id))
         if ev.offering_id is None:
-            ev.issues.append(
-                _Issue(
-                    C_QUAL,
-                    "No approved course offering exists for this College, Campus and Qualification.",
-                    "BLOCK",
-                )
+            _reference_issue(
+                row,
+                ev,
+                "qualification",
+                C_QUAL,
+                qual_raw,
+                "No approved course offering exists for this College, Campus and Qualification.",
             )
 
 
 def _reference_issue(row: ImportStagedRow, ev: _Eval, entity: str, field_name: str, value: str, message: str) -> None:
-    """Record an unresolved reference and its per-entity decision state (rule 2.4)."""
+    """Record an unresolved reference and its per-entity decision state (rule 2.4).
+
+    Raised, the row no longer blocks and is written unverified (15 September
+    2026). An EXCEPT choice is not honoured: an unmatched value is never accepted
+    as an exception, so the row still blocks.
+    """
     choice = getattr(row, f"{entity}_choice", None)
-    if choice in {"RAISE", "EXCEPT"}:
-        # Decided: a student cannot be written without a resolved offering, so
-        # the row drops out of this apply. It no longer blocks (keep-strict).
-        ev.force_excluded = True
-        note = "Raised as a suggestion." if choice == "RAISE" else "Accepted as an exception."
-        ev.issues.append(_Issue(field_name, f"{message} {note}", "NOTE"))
+    if choice == "RAISE":
+        ev.unverified = True
+        ev.issues.append(
+            _Issue(
+                field_name,
+                f"{message} Raised as a suggestion - stored unverified until it is resolved.",
+                "NOTE",
+            )
+        )
         return
-    ev.issues.append(_Issue(field_name, f"{message} Resolve it, raise a suggestion, or accept an exception.", "BLOCK"))
+    ev.issues.append(_Issue(field_name, f"{message} Correct it, resolve it, or raise a suggestion.", "BLOCK"))
+
+
+def _rule_issue(row: ImportStagedRow, ev: _Eval, field_name: str, message: str) -> None:
+    """A predefined rule broken by a row that can still be stored (15 September 2026).
+
+    The same three choices as every import: accept it as an exception for this
+    import only, exclude the row, or correct it. The acceptance is held on the
+    staged row, so it goes with the batch.
+    """
+    if (row.working_values or {}).get("_accepted_exception"):
+        ev.issues.append(_Issue(field_name, f"{message} Accepted as an exception for this import.", "ACCEPTED"))
+    else:
+        ev.issues.append(
+            _Issue(
+                field_name,
+                f"{message} Correct it, exclude the row, or accept it as an exception for this import.",
+                "EXCEPTION",
+            )
+        )
 
 
 def _evaluate(
@@ -457,7 +491,7 @@ def _evaluate(
     if end_err:
         ev.issues.append(_Issue(C_END, f"Proposed End Date {end_err}.", "REFUSE_ROW"))
     if ev.start_date and ev.end_date and ev.end_date <= ev.start_date:
-        ev.issues.append(_Issue(C_END, "Proposed End Date must be after Proposed Start Date.", "REFUSE_ROW"))
+        _rule_issue(row, ev, C_END, "Proposed End Date must be after Proposed Start Date.")
 
     # -- Reference resolution (rule 2.4) -----------------------------------
     _resolve_references(values, lookups, row, ev)
@@ -465,7 +499,9 @@ def _evaluate(
     # -- Intake and group (rule 2.5) ---------------------------------------
     if ev.ct_student:
         ev.intake_match_status = "NOT_APPLICABLE"
-    elif ev.qualification_code and ev.start_date and ev.end_date and ev.end_date > ev.start_date:
+    # An intake belongs to an offering, so an unverified row has none until it
+    # is completed.
+    elif ev.offering_id and ev.qualification_code and ev.start_date and ev.end_date and ev.end_date > ev.start_date:
         # The duration used to find the rolling loop. A user-chosen approved
         # Course Duration Option wins over the one derived from the dates; the
         # dates themselves are never rewritten (OD-08).
@@ -480,13 +516,13 @@ def _evaluate(
             ev.group_code = assignment.intake_group
             ev.intake_start_date = assignment.intake_start_date
         elif assignment.status == intake_assignment.CONFLICT:
-            ev.issues.append(
-                _Issue(
-                    C_QUAL,
-                    "Two intakes' first units run in this student's start week — the rolling "
-                    f"timetable is inconsistent: {', '.join(assignment.conflict_labels)}.",
-                    "REFUSE_ROW",
-                )
+            # Accepted, the student is stored with Intake TBD.
+            _rule_issue(
+                row,
+                ev,
+                C_QUAL,
+                "Two intakes' first units run in this student's start week — the rolling "
+                f"timetable is inconsistent: {', '.join(assignment.conflict_labels)}.",
             )
         else:  # TBD — report, and store
             ev.intake_match_status = "TBD"
@@ -507,18 +543,25 @@ def _detect_duplicates(
     existing_by_student: dict[str, list[Student]],
     seen_offerings: dict[tuple[str, int], int],
 ) -> None:
-    if not ev.student_id or not ev.qualification_id or not ev.offering_id:
+    if not ev.student_id:
+        return
+    if not ev.offering_id and not ev.unverified:
         return
 
     # Within-file: the same Student ID + offering appearing twice is a duplicate.
-    seen_key = (ev.student_id, ev.offering_id)
+    # An unverified row has no offering yet and counts as one, the way the
+    # database counts a NULL offering (`postgresql_nulls_not_distinct`).
+    seen_key = (ev.student_id, ev.offering_id or 0)
     if seen_key in seen_offerings:
         ev.duplicate_scope = "SAME_QUALIFICATION"
         ev.issues.append(_Issue(C_STUDENT_ID, "This Student ID and offering already appears in this file.", "BLOCK_DUP"))
         return
 
     stored = existing_by_student.get(ev.student_id, [])
-    same_qual = [s for s in stored if s.course_offering_id == ev.offering_id or _same_qualification(s, ev)]
+    if ev.offering_id:
+        same_qual = [s for s in stored if s.course_offering_id == ev.offering_id or _same_qualification(s, ev)]
+    else:
+        same_qual = [s for s in stored if s.course_offering_id is None]
     other_qual = [s for s in stored if s not in same_qual]
 
     if same_qual:
@@ -563,7 +606,7 @@ def _decide_status(row: ImportStagedRow, ev: _Eval) -> str:
     if row.excluded_by_user or ev.force_excluded:
         return EXCLUDED
     kinds = {issue.issue_status for issue in ev.issues}
-    if "REFUSE_ROW" in kinds:
+    if "REFUSE_ROW" in kinds or "EXCEPTION" in kinds:
         return NEEDS_CORRECTION
     if "BLOCK_DUP" in kinds:
         return DUPLICATE
@@ -618,7 +661,9 @@ def _bulk_context(session: Session, qualification_codes: set[str], student_ids: 
         stored = list(
             session.execute(
                 select(Student, CourseOffering.qualification_id)
-                .join(CourseOffering, CourseOffering.id == Student.course_offering_id)
+                # Outer: an unverified student has no offering and is still a
+                # record this Student ID holds.
+                .outerjoin(CourseOffering, CourseOffering.id == Student.course_offering_id)
                 .where(Student.student_id.in_(student_ids), Student.is_deleted.is_(False))
             ).all()
         )
@@ -716,8 +761,8 @@ def _evaluate_batch(
         if group_present:
             ev.issues.append(_Issue("Group", "A Group column was present and ignored — Group is derived from the intake.", "NOTE"))
         _persist_eval(row, ev)
-        if ev.offering_id and ev.student_id and ev.row_status == READY:
-            seen_offerings[(ev.student_id, ev.offering_id)] = row.id
+        if (ev.offering_id or ev.unverified) and ev.student_id and ev.row_status == READY:
+            seen_offerings[(ev.student_id, ev.offering_id or 0)] = row.id
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +944,9 @@ def patch_rows(session: Session, batch: ImportBatch, items: list) -> None:
             _apply_corrections(row, item.corrections)
         if item.exclude is not None:
             row.excluded_by_user = bool(item.exclude)
+        if item.accept_exception is not None:
+            # True accepts the row's broken rule for this import; False is Undo.
+            row.working_values = {**(row.working_values or {}), "_accepted_exception": bool(item.accept_exception)}
         if item.duplicate_decision is not None:
             row.duplicate_decision = item.duplicate_decision.upper()
         if item.duration_weeks is not None:
@@ -981,7 +1029,6 @@ def apply_batch(session: Session, batch: ImportBatch, user: User) -> dict:
 
     # 1) Raise suggestions for RAISE choices (rule 2.4), deduplicated by value.
     suggestions_raised = _raise_suggestions(session, rows, user)
-    exceptions_recorded, exception_warnings = _record_exceptions(session, rows, user)
 
     # 2) Resolve every needed group in ONE query, then create the missing ones,
     #    so students in one intake share a single group row (A11).
@@ -1022,6 +1069,11 @@ def apply_batch(session: Session, batch: ImportBatch, user: User) -> dict:
     batch.excluded_count = excluded
     batch.duplicate_count = sum(1 for r in rows if r.duplicate_scope)
     batch.unmatched_count = tbd
+    # The staged copy of the file has done its work. It is reachable from
+    # nowhere once the import finishes, and holds names, emails and phone
+    # numbers, so it is dropped here rather than kept for nothing (21 September
+    # 2026). The batch row stays as the record of the upload and its counts.
+    session.execute(delete(ImportStagedRow).where(ImportStagedRow.import_batch_id == batch.id))
     session.flush()
 
     record_activity(
@@ -1045,8 +1097,8 @@ def apply_batch(session: Session, batch: ImportBatch, user: User) -> dict:
         "duplicates": batch.duplicate_count or 0,
         "unmatched": tbd,
         "suggestions_raised": suggestions_raised,
-        "exceptions_recorded": exceptions_recorded,
-        "warnings": exception_warnings,
+        # Written with no offering because a reference was raised (15 September 2026).
+        "unverified": sum(1 for r in writable if not r.resolved_offering_id),
         "intakes_matched": matched,
         "intakes_tbd": tbd,
         "intakes_not_applicable": na,
@@ -1165,6 +1217,11 @@ def _insert_dict(
         "primary_phone": (row.primary_phone_value or "").strip() or None,
         "college_email": email,
         "course_offering_id": row.resolved_offering_id,
+        # What the file said, kept whether or not it resolved: the evidence a
+        # suggestion is raised from, and what a later resolve matches on.
+        "college_text": (row.college_value or "").strip() or None,
+        "campus_text": (row.campus_value or "").strip() or None,
+        "qualification_text": (row.qualification_value or "").strip() or None,
         "student_group_id": group_id,
         # A Credit Transfer student never carries a Course Duration Option
         # (approved 13 August 2026); everyone else carries the one the user
@@ -1193,6 +1250,18 @@ def _update_existing(
     session.flush()
 
 
+def _student_attributes(entity: str, row: ImportStagedRow) -> dict:
+    """What the Add form can be pre-filled with from a student row (15 September 2026)."""
+    college = (row.college_value or "").strip()
+    campus = (row.campus_value or "").strip()
+    if entity == "COLLEGE":
+        return {"campuses": [campus] if campus else []}
+    if entity == "CAMPUS":
+        return {"college": college}
+    location = {key: value for key, value in (("college", college), ("campus", campus)) if value}
+    return {"locations": [location] if location else []}
+
+
 def _raise_suggestions(session: Session, rows: list[ImportStagedRow], user: User) -> int:
     """Write reference_suggestion rows for RAISE choices, deduplicated (R3, R6)."""
     raised = 0
@@ -1204,66 +1273,22 @@ def _raise_suggestions(session: Session, rows: list[ImportStagedRow], user: User
         ):
             choice = getattr(row, f"{entity.lower()}_choice", None)
             if choice == "RAISE" and value:
-                # Context is intentionally empty: the same unmatched value on
-                # many rows is one suggestion whose occurrence_count rises (R6),
-                # not one suggestion per student.
+                # One entry per unmatched value, whose occurrence_count rises
+                # (R6) - not one per student. A campus is the exception: the
+                # same spelling is a different place at a different college
+                # ("Sydney (Haymarket)" is not one campus), so a campus entry
+                # names its college and is decided per college (21 September 2026).
+                context = {"college": (row.college_value or "").strip()} if entity == "CAMPUS" else {}
                 created = raise_reference_suggestion(
                     session,
                     entity_type=entity,
                     raw_value=value,
-                    context={},
+                    context={key: value for key, value in context.items() if value},
                     source="STUDENT_IMPORT",
+                    attributes=_student_attributes(entity, row),
                 )
                 raised += 1 if created else 0
     return raised
-
-
-def _record_exceptions(
-    session: Session, rows: list[ImportStagedRow], user: User
-) -> tuple[int, list[str]]:
-    """Record the values accepted as exceptions (section 2.9.1).
-
-    Written at apply time, in the same transaction as the students, so an
-    abandoned batch leaves nothing behind. The raise behaviour above is
-    deliberately unchanged — only the exception is now durable.
-    """
-    from app.services.reference_suggestions import record_reference_exception
-
-    recorded = 0
-    warnings: list[str] = []
-    for row in rows:
-        for entity, value in (
-            ("COLLEGE", row.college_value),
-            ("CAMPUS", row.campus_value),
-            ("QUALIFICATION", row.qualification_value),
-        ):
-            choice = getattr(row, f"{entity.lower()}_choice", None)
-            if choice != "EXCEPT" or not value:
-                continue
-            record, warning = record_reference_exception(
-                session,
-                entity_type=entity,
-                raw_value=value,
-                context={},
-                source="STUDENT_IMPORT",
-                user_id=user.id,
-            )
-            if warning:
-                if warning not in warnings:
-                    warnings.append(warning)
-                continue
-            if record is not None:
-                recorded += 1
-                record_activity(
-                    session,
-                    user=user,
-                    action="UPDATE",
-                    page_or_function=STUDENT_IMPORT_PAGE,
-                    detail=f"Accepted {entity} '{value}' as an exception.",
-                    record_reference=str(record.id),
-                    result="COMPLETED",
-                )
-    return recorded, warnings
 
 
 def abandon_batch(session: Session, batch: ImportBatch) -> None:

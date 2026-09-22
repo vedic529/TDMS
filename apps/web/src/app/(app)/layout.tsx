@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 
 import { TopNavigation } from '@/components/common/top-navigation';
-import { DevAccessPreview } from '@/features/dev-tools/dev-access-preview';
 import { ReferenceDataProvider } from '@/features/shared/reference-data-context';
 import { useAuth } from '@/features/auth/auth-context';
 
@@ -42,11 +41,10 @@ export default function OperationalLayout({ children }: { children: React.ReactN
         <footer className="border-t border-border bg-background">
           <div className="mx-auto flex max-w-[1600px] flex-col gap-1 px-4 py-4 text-[12px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-6">
             <p>TDMS — Timetable Database Management System · Internal use only</p>
-            <p>Frontend prototype. Demo data only; not production student, trainer or timetable information.</p>
+            <p>Connected to the TDMS API and PostgreSQL database.</p>
           </div>
         </footer>
       </div>
-      <DevAccessPreview />
     </ReferenceDataProvider>
   );
 }

@@ -10,14 +10,19 @@ import { env } from '@/lib/env';
 import { getAuthProvider } from './auth';
 import { ReferenceApiError } from './reference-api';
 
-/** The six entity types a suggestion can stand in for. */
+/**
+ * What a suggestion can stand in for. ROLLING is a class the rolling timetable
+ * does not account for; CITY is a city the City Dictionary does not hold.
+ */
 export type SuggestionEntityType =
   | 'COLLEGE'
   | 'CAMPUS'
   | 'QUALIFICATION'
   | 'UNIT'
   | 'FACILITY'
-  | 'TRAINER';
+  | 'TRAINER'
+  | 'ROLLING'
+  | 'CITY';
 
 /** PENDING awaits a decision; EXCEPTION was accepted and still stands. */
 export type SuggestionStatus =
@@ -34,6 +39,11 @@ export interface ReferenceSuggestion {
   entity_type: SuggestionEntityType;
   raw_value: string;
   context: Record<string, string>;
+  /**
+   * The raising row's other values, for pre-filling the form Add opens: a
+   * unit's title, the campus a room was named at. Lists gather every row.
+   */
+  attributes: SuggestionAttributes;
   source: string;
   occurrence_count: number;
   first_seen_at: string;
@@ -45,6 +55,9 @@ export interface ReferenceSuggestion {
   accepted_at: string | null;
   exception_note: string | null;
 }
+
+export type SuggestionAttributeValue = string | number | null | Array<string | Record<string, string>>;
+export type SuggestionAttributes = Record<string, SuggestionAttributeValue>;
 
 export interface SuggestionList {
   items: ReferenceSuggestion[];
@@ -166,6 +179,12 @@ export const suggestionsApi = {
     resolvedEntityId?: number,
     /** Fields for a record CREATE must bring into existence, e.g. a unit title. */
     createValues?: Record<string, string>,
+    /**
+     * REJECT deletes what carries the value. A reason is required when unverified
+     * students are among them: a student is deleted the approved way, with a
+     * reason and a recovery window (DATA-04).
+     */
+    reason?: { code?: string; detail?: string },
   ) =>
     request<SuggestionResolveResult>(`/suggestions/${suggestionId}/resolve`, {
       method: 'POST',
@@ -173,6 +192,8 @@ export const suggestionsApi = {
         action,
         resolved_entity_id: resolvedEntityId ?? null,
         create_values: createValues ?? null,
+        reason_code: reason?.code ?? null,
+        reason_detail: reason?.detail ?? null,
       }),
     }),
 };
@@ -185,4 +206,6 @@ export const ENTITY_LABELS: Record<SuggestionEntityType, string> = {
   UNIT: 'Unit',
   FACILITY: 'Classroom',
   TRAINER: 'Trainer',
+  ROLLING: 'Rolling timetable',
+  CITY: 'City',
 };

@@ -36,7 +36,7 @@ import {
   COURSE_SECTOR_OPTIONS,
   FIELD_OF_EDUCATION_BROAD_OPTIONS,
   FIELD_OF_EDUCATION_NARROW_OPTIONS,
-} from '@/mock-data';
+} from '@/lib/reference-options';
 import type { ValidationIssue, ValidationResult } from '@/types/common';
 import type { CourseRecord, CourseStatus } from '@/types/reference';
 import type { CourseInput } from '@/services/tdms-client';

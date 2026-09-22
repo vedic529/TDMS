@@ -12,6 +12,7 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Table2,
   Undo2,
   X,
 } from 'lucide-react';
@@ -41,6 +42,15 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { FileDropzone } from '@/components/common/file-dropzone';
 import { ImportStatusBadge } from '@/components/common/status-badge';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ConfirmationDialog } from '@/components/common/confirmation-dialog';
 import { CountTile } from '@/components/common/import-summary';
 import { EmptyState, ReadOnlyNotice } from '@/components/common/states';
@@ -106,7 +116,7 @@ type Drafts = Record<number, Record<string, string>>;
  * The uploaded file is sent to `POST /students/import/stage`, which parses
  * **CSV and XLSX with the same code path**, resolves the references, derives the
  * Intake and Group from the rolling timetable, and returns the staged rows. The
- * browser never parses a workbook, and no demo data is ever substituted.
+ * browser never parses a workbook; validation uses the database records.
  *
  * Nothing reaches `students` until the confirmation is accepted (BULK-02).
  */
@@ -117,6 +127,9 @@ export function BulkStudentImport() {
   const [result, setResult] = React.useState<ImportApplyResult | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+  // The staged rows are a wall of data nobody reads while deciding. They open
+  // on demand, still editable (21 September 2026).
+  const [previewOpen, setPreviewOpen] = React.useState(false);
 
   const canImport = permissions.maintainStudentData;
   const errorsRef = React.useRef<HTMLDivElement>(null);
@@ -186,12 +199,13 @@ export function BulkStudentImport() {
    * itself rather than by row.
    *
    * One campus spelled differently from the approved record is a single problem
-   * on hundreds of rows, and it is settled once: raise it as a suggestion for an
-   * admin to add or map, or accept it as an exception. Grouping is what makes
-   * that one click instead of hundreds.
+   * on hundreds of rows, and it is settled once: raised as a suggestion for an
+   * admin to add or map. Grouping is what makes that one click instead of
+   * hundreds.
    *
-   * A row whose three references all resolved but has no approved offering is
-   * deliberately excluded — that is a correction, not a value to suggest.
+   * A row whose three references all resolved but that no approved offering
+   * holds is gathered under its qualification (15 September 2026): Add places
+   * the qualification at that college and campus.
    */
   const unmatchedGroups = React.useMemo(() => {
     const byEntity: Record<string, { entity: 'college' | 'campus' | 'qualification'; resolved: keyof StagedRow; value: keyof StagedRow }> = {
@@ -201,38 +215,76 @@ export function BulkStudentImport() {
     };
     const groups = new Map<
       string,
-      { entity: 'college' | 'campus' | 'qualification'; label: string; value: string; rows: StagedRow[] }
+      {
+        entity: 'college' | 'campus' | 'qualification';
+        label: string;
+        value: string;
+        /** A campus is decided per college: the same spelling is a different place elsewhere. */
+        college?: string;
+        rows: StagedRow[];
+      }
     >();
 
     rows
-      .filter((row) => row.status === 'UNMATCHED_REFERENCE')
+      // A row set to raise is Ready, not blocking, but its decision stays on
+      // screen so it can be undone before the file is saved.
+      .filter((row) => row.status === 'UNMATCHED_REFERENCE' || row.status === 'READY')
       .forEach((row) => {
         row.issues
           .filter((issue) => issue.issue_status === 'BLOCK')
           .forEach((issue) => {
             const mapping = byEntity[issue.field_name];
-            // Only a genuinely unresolved entity can be suggested.
-            if (!mapping || row[mapping.resolved] != null) return;
+            if (!mapping) return;
+            // A resolved qualification no offering holds at this college and
+            // campus is raised the same way as an unresolved value.
+            const offeringMissing = mapping.entity === 'qualification' && row.resolved_offering_id == null;
+            if (row[mapping.resolved] != null && !offeringMissing) return;
+            if (row.status === 'READY' && row[`${mapping.entity}_choice` as keyof StagedRow] !== 'RAISE') return;
             const value = String(row[mapping.value] ?? '').trim();
             if (!value) return;
-            const key = `${mapping.entity}||${value.toUpperCase()}`;
+            // "Sydney (Haymarket)" is one college's Haymarket and another's
+            // Blacktown, so a campus is grouped, raised and mapped per college.
+            const college = mapping.entity === 'campus' ? String(row.college_value ?? '').trim() : '';
+            const key = `${mapping.entity}||${value.toUpperCase()}||${college.toUpperCase()}`;
             const existing = groups.get(key);
             if (existing) existing.rows.push(row);
-            else groups.set(key, { entity: mapping.entity, label: issue.field_name, value, rows: [row] });
+            else
+              groups.set(key, {
+                entity: mapping.entity,
+                label: issue.field_name,
+                value,
+                college: college || undefined,
+                rows: [row],
+              });
           });
       });
     return [...groups.values()].sort((a, b) => b.rows.length - a.rows.length);
   }, [rows]);
 
-  function resolveReferenceForAll(
-    group: { entity: 'college' | 'campus' | 'qualification'; label: string; value: string; rows: StagedRow[] },
-    choice: 'RAISE' | 'EXCEPT',
-  ) {
+  type UnmatchedGroup = {
+    entity: 'college' | 'campus' | 'qualification';
+    label: string;
+    value: string;
+    college?: string;
+    rows: StagedRow[];
+  };
+
+  /**
+   * Set to raise, not raised. Like the timetable import, a decision is held on
+   * the staged rows and undoable; the suggestions themselves are written only
+   * when the file is saved (21 September 2026).
+   */
+  function raiseReferenceForAll(group: UnmatchedGroup) {
     void patch(
-      group.rows.map((row) => ({ row_id: row.id, reference_entity: group.entity, reference_choice: choice })),
-      choice === 'RAISE'
-        ? `${group.label} “${group.value}” raised as a suggestion`
-        : `${group.label} “${group.value}” accepted as an exception`,
+      group.rows.map((row) => ({ row_id: row.id, reference_entity: group.entity, reference_choice: 'RAISE' })),
+      `${group.label} “${group.value}” will be raised when the file is saved`,
+    );
+  }
+
+  function undoRaiseForAll(group: UnmatchedGroup) {
+    void patch(
+      group.rows.map((row) => ({ row_id: row.id, reference_entity: group.entity, reference_choice: 'NONE' })),
+      `${group.label} “${group.value}” returned to a decision`,
     );
   }
 
@@ -326,15 +378,8 @@ export function BulkStudentImport() {
     void patch([{ row_id: rowId, status_value: statusValue }], 'Enrolment status recorded');
   }
 
-  function resolveReference(
-    rowId: number,
-    entity: 'college' | 'campus' | 'qualification',
-    choice: 'RAISE' | 'EXCEPT',
-  ) {
-    void patch(
-      [{ row_id: rowId, reference_entity: entity, reference_choice: choice }],
-      choice === 'RAISE' ? 'Suggestion raised' : 'Exception accepted',
-    );
+  function raiseReference(rowId: number, entity: 'college' | 'campus' | 'qualification') {
+    void patch([{ row_id: rowId, reference_entity: entity, reference_choice: 'RAISE' }], 'Suggestion raised');
   }
 
   async function save() {
@@ -346,7 +391,11 @@ export function BulkStudentImport() {
       setReview(null);
       setConfirmOpen(false);
       toast.success('Bulk student import saved', {
-        description: `${applied.inserted} student ${applied.inserted === 1 ? 'record was' : 'records were'} added and a user activity record was created.`,
+        description:
+          `${applied.inserted} student ${applied.inserted === 1 ? 'record was' : 'records were'} added and a user activity record was created.` +
+          (applied.unverified
+            ? ` ${applied.unverified} ${applied.unverified === 1 ? 'is' : 'are'} unverified until the raised suggestions are resolved.`
+            : ''),
       });
     } catch (error) {
       toast.error('The import could not be saved', { description: describe(error) });
@@ -593,8 +642,9 @@ export function BulkStudentImport() {
               <div>
                 <CardTitle>Staging area</CardTitle>
                 <CardDescription>
-                  Correct a value directly in the table, or exclude a row. Intake and Group are derived by the system
-                  from the rolling timetable and cannot be typed.
+                  {rows.length.toLocaleString()} staged {rows.length === 1 ? 'row' : 'rows'}. Open the preview to
+                  correct a value or exclude a row. Intake and Group are derived by the system from the rolling
+                  timetable and cannot be typed.
                 </CardDescription>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -628,6 +678,10 @@ export function BulkStudentImport() {
                   </DropdownMenuContent>
                 </DropdownMenu>
 
+                <Button variant="outline" size="sm" onClick={() => setPreviewOpen(true)}>
+                  <Table2 aria-hidden="true" />
+                  Preview staged data
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => void revalidate()} disabled={busy || !canImport}>
                   {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
                   {pendingCorrections > 0 ? `Apply ${pendingCorrections} correction(s)` : 'Revalidate'}
@@ -676,7 +730,17 @@ export function BulkStudentImport() {
                 </Alert>
               )}
 
-              <TableContainer className="max-h-[32rem]">
+              <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+                <DialogContent size="full" className="max-w-[96vw]">
+                  <DialogHeader>
+                    <DialogTitle>Staged data · {rows.length.toLocaleString()} rows</DialogTitle>
+                    <DialogDescription>
+                      Correct a value directly in the table, or exclude a row. Changes are applied when you close this
+                      and press Apply corrections.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogBody>
+              <TableContainer className="max-h-[70vh]">
                 <Table aria-label="Bulk student import staging area">
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
@@ -736,7 +800,11 @@ export function BulkStudentImport() {
                                   <li
                                     key={index}
                                     className={`text-[12px] leading-relaxed ${
-                                      issue.issue_status === 'NOTE' ? 'text-muted-foreground' : 'text-destructive'
+                                      issue.issue_status === 'NOTE'
+                                        ? 'text-muted-foreground'
+                                        : issue.issue_status === 'ACCEPTED'
+                                          ? 'text-success'
+                                          : 'text-destructive'
                                     }`}
                                   >
                                     <span className="font-medium">{issue.field_name}:</span> {issue.message}
@@ -758,24 +826,43 @@ export function BulkStudentImport() {
                                         variant="outline"
                                         size="sm"
                                         className="h-6 text-[11px]"
-                                        onClick={() => resolveReference(row.id, entity, 'RAISE')}
+                                        onClick={() => raiseReference(row.id, entity)}
                                         disabled={busy}
                                       >
                                         Raise {entity}
-                                      </Button>
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-6 text-[11px]"
-                                        onClick={() => resolveReference(row.id, entity, 'EXCEPT')}
-                                        disabled={busy}
-                                      >
-                                        Except
                                       </Button>
                                     </React.Fragment>
                                   ))}
                               </div>
                             )}
+                            {/* A broken rule: accepted for this import, corrected, or excluded. */}
+                            {canImport && row.issues.some((issue) => issue.issue_status === 'ACCEPTED') && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="mt-2 h-6 gap-1 text-[11px]"
+                                onClick={() => void patch([{ row_id: row.id, accept_exception: false }], 'Exception undone')}
+                                disabled={busy}
+                              >
+                                <Undo2 aria-hidden="true" className="size-3" />
+                                Undo accepted exception
+                              </Button>
+                            )}
+                            {canImport &&
+                              !excluded &&
+                              row.issues.some((issue) => issue.issue_status === 'EXCEPTION') && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="mt-2 h-6 text-[11px]"
+                                  onClick={() =>
+                                    void patch([{ row_id: row.id, accept_exception: true }], 'Exception accepted for this import')
+                                  }
+                                  disabled={busy}
+                                >
+                                  Accept exception
+                                </Button>
+                              )}
                           </TableCell>
                           <TableCell className="text-right">
                             <Button variant="ghost" size="sm" onClick={() => toggleExclude(row)} disabled={!canImport || busy}>
@@ -798,6 +885,23 @@ export function BulkStudentImport() {
                   </TableBody>
                 </Table>
               </TableContainer>
+                  </DialogBody>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setPreviewOpen(false)}>
+                      Close
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setPreviewOpen(false);
+                        void revalidate();
+                      }}
+                      disabled={busy || !canImport}
+                    >
+                      {pendingCorrections > 0 ? `Apply ${pendingCorrections} correction(s)` : 'Revalidate'}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
             </CardContent>
           </Card>
 
@@ -836,56 +940,85 @@ export function BulkStudentImport() {
                         {unmatchedGroups.length === 1 ? 'value' : 'values'}
                       </p>
                       <p className="text-[12px] text-muted-foreground">
-                        Correct the spelling in the staging area, or settle the value here for every row at once.
-                        <strong> Raise suggestion</strong> sends it to the reference-data queue, where an admin adds it
-                        for the college or maps it to the approved record. <strong>Accept exception</strong> leaves the
-                        value unapproved, and those rows are not written.
+                        Correct the spelling in the preview, or raise the value here for every row at once.
+                        <strong> Raise suggestion</strong> settles the rows now and is undoable; the entry itself
+                        reaches the reference-data queue only when the file is saved. Those rows save as unverified
+                        students and are completed when an admin adds or maps the value.
                       </p>
                     </div>
 
-                    {unmatchedGroups.map((group) => (
-                      <div
-                        key={`${group.entity}-${group.value}`}
-                        className="rounded-md border border-border bg-muted/40 px-3 py-3"
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="destructive" className="tabular">
-                            {group.rows.length}
-                          </Badge>
-                          <span className="text-[13px] font-medium">{group.label}</span>
-                          <span className="text-[13px]">“{group.value}”</span>
-                          <span className="text-[11px] text-muted-foreground">
-                            is not an approved record · rows{' '}
-                            {group.rows.slice(0, 8).map((row) => row.source_row_number).join(', ')}
-                            {group.rows.length > 8 ? `, +${group.rows.length - 8} more` : ''}
-                          </span>
+                    {unmatchedGroups.map((group) => {
+                      const set = group.rows.every(
+                        (row) => row[`${group.entity}_choice` as keyof StagedRow] === 'RAISE',
+                      );
+                      return (
+                        <div
+                          key={`${group.entity}-${group.value}-${group.college ?? ''}`}
+                          className={`rounded-md border px-3 py-3 ${
+                            set ? 'border-success/30 bg-success-soft/40' : 'border-border bg-muted/40'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={set ? 'success' : 'destructive'} className="tabular">
+                              {group.rows.length}
+                            </Badge>
+                            <span className="text-[13px] font-medium">{group.label}</span>
+                            <span className="text-[13px]">“{group.value}”</span>
+                            {group.college && (
+                              <Badge variant="outline" className="text-[10px]">
+                                {group.college}
+                              </Badge>
+                            )}
+                            <span className="text-[11px] text-muted-foreground">
+                              is not an approved record · rows{' '}
+                              {group.rows.slice(0, 8).map((row) => row.source_row_number).join(', ')}
+                              {group.rows.length > 8 ? `, +${group.rows.length - 8} more` : ''}
+                            </span>
+                          </div>
+                          {group.entity === 'campus' && (
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              Decided for {group.college || 'this college'} only — the same spelling at another
+                              college is a different place, and is listed separately.
+                            </p>
+                          )}
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            {set ? (
+                              <>
+                                <span className="text-[12px] font-medium text-success">
+                                  Set to raise — the suggestion is created when the file is saved.
+                                </span>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 text-[12px]"
+                                  onClick={() => undoRaiseForAll(group)}
+                                  disabled={!canImport || busy}
+                                >
+                                  <Undo2 aria-hidden="true" className="size-3" />
+                                  Undo
+                                </Button>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-[12px] font-medium">
+                                  Apply to all {group.rows.length} {group.rows.length === 1 ? 'row' : 'rows'}:
+                                </span>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 text-[12px]"
+                                  onClick={() => raiseReferenceForAll(group)}
+                                  disabled={!canImport || busy}
+                                >
+                                  <Lightbulb aria-hidden="true" />
+                                  Raise suggestion
+                                </Button>
+                              </>
+                            )}
+                          </div>
                         </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span className="text-[12px] font-medium">
-                            Apply to all {group.rows.length} {group.rows.length === 1 ? 'row' : 'rows'}:
-                          </span>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-[12px]"
-                            onClick={() => resolveReferenceForAll(group, 'RAISE')}
-                            disabled={!canImport || busy}
-                          >
-                            <Lightbulb aria-hidden="true" />
-                            Raise suggestion
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 text-[12px]"
-                            onClick={() => resolveReferenceForAll(group, 'EXCEPT')}
-                            disabled={!canImport || busy}
-                          >
-                            Accept exception
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 

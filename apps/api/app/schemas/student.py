@@ -40,7 +40,8 @@ class StudentRead(BaseModel):
     primary_phone: str | None = None
     remarks: str | None = None
 
-    course_offering_id: int
+    #: NULL while the student is unverified (a reference raised as a suggestion).
+    course_offering_id: int | None = None
     student_group_id: int | None = None
 
     # Derived / joined display values (never stored on the student row).
@@ -52,6 +53,11 @@ class StudentRead(BaseModel):
     intake_label: str | None = None
     group_code: str | None = None
     course_duration_option_weeks: int | None = None
+
+    #: Approved 15 September 2026: stored with a value that matches no approved
+    #: record, and which of college, campus and qualification that is.
+    is_unverified: bool = False
+    unverified_fields: list[str] = []
 
     # DATA-04 soft-delete metadata, shown in the recycle area.
     is_deleted: bool = False
@@ -216,6 +222,8 @@ class RowPatch(BaseModel):
     corrections: list[RowCorrection] | None = None
     # Row lifecycle: exclude or re-include a row.
     exclude: bool | None = None
+    #: Accept the row's broken rule for this import (true), or undo that (false).
+    accept_exception: bool | None = None
     #: Resolve a TBD intake by choosing an approved duration (OD-08). 0 clears it.
     duration_weeks: int | None = None
     # Duplicate decisions (2.6).
@@ -224,7 +232,7 @@ class RowPatch(BaseModel):
     existing_status_value: str | None = None  # re-status the stored record
     # Reference resolution (2.4). entity in {college, campus, qualification}.
     reference_entity: str | None = None
-    reference_choice: str | None = None  # RAISE | EXCEPT | RESOLVE
+    reference_choice: str | None = None  # RAISE | RESOLVE
     reference_resolved_id: int | None = None
 
 
@@ -241,9 +249,8 @@ class ImportApplyRead(BaseModel):
     duplicates: int
     unmatched: int
     suggestions_raised: int
-    #: Values accepted as exceptions and recorded (section 2.9).
-    exceptions_recorded: int = 0
-    #: Values already decided, so not reopened as exceptions (2.9.2).
+    #: Written with no offering because a reference was raised (15 September 2026).
+    unverified: int = 0
     warnings: list[str] = []
     intakes_matched: int
     intakes_tbd: int
@@ -346,7 +353,20 @@ class StudentTimetableRead(BaseModel):
     intake: TimetableIntakeRead
     scope: TimetableScopeRead
     course_dates: TimetableCourseDatesRead
-    #: null | CREDIT_TRANSFER | NO_ROLLING_TIMETABLE | NO_ROLLING_ROWS
+    #: null | UNVERIFIED | CREDIT_TRANSFER | NO_ROLLING_TIMETABLE | NO_ROLLING_ROWS
     empty_reason: str | None = None
     summary: TimetableSummaryRead
     rows: list[TimetableRowRead] = []
+
+
+class ClearStudentsRead(BaseModel):
+    """What clearing the student records removed, or would remove."""
+
+    students: int
+    #: Records in the recycle area. They go too: "no deleted record left".
+    deleted_students: int
+    intakes: int
+    import_batches: int
+    staged_rows: int
+    #: Open entries left with nothing behind them. Only known after the delete.
+    suggestions: int = 0

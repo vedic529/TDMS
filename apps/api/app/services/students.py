@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core import intake_assignment
 from app.core.intake_assignment import assign_intake, build_windows
-from app.models.college import Campus, College, CollegeCampus
+from app.models.college import Campus, CampusSourceAddress, College, CollegeCampus
 from app.models.course import CourseOffering, OfferingDurationOption
 from app.models.qualification import Qualification
 from app.models.reason import ReasonCode
@@ -148,10 +148,12 @@ def _base_read_query() -> Select:
             User.organisation_email,
             ReasonCode.code,
         )
-        .join(CourseOffering, CourseOffering.id == Student.course_offering_id)
-        .join(College, College.id == CourseOffering.college_id)
-        .join(Campus, Campus.id == CourseOffering.campus_id)
-        .join(Qualification, Qualification.id == CourseOffering.qualification_id)
+        # Outer since 15 September 2026: an unverified student has no offering,
+        # and an inner join hid exactly the records that need attention.
+        .outerjoin(CourseOffering, CourseOffering.id == Student.course_offering_id)
+        .outerjoin(College, College.id == CourseOffering.college_id)
+        .outerjoin(Campus, Campus.id == CourseOffering.campus_id)
+        .outerjoin(Qualification, Qualification.id == CourseOffering.qualification_id)
         .outerjoin(StudentGroup, StudentGroup.id == Student.student_group_id)
         .outerjoin(
             OfferingDurationOption, OfferingDurationOption.id == Student.course_duration_option_id
@@ -163,7 +165,51 @@ def _base_read_query() -> Select:
     )
 
 
-def _to_read_dict(row) -> dict:
+def _plain(value: object) -> str:
+    return " ".join(str(value or "").split()).upper()
+
+
+def _reference_names(session: Session) -> dict[str, set[str]]:
+    """Every approved spelling of a college, campus and qualification. Four queries."""
+    names: dict[str, set[str]] = {"college": set(), "campus": set(), "qualification": set()}
+    for short, full in session.execute(select(College.college_short_name, College.college_full_name)).all():
+        names["college"].update({_plain(short), _plain(full)})
+    for name, location, code in session.execute(
+        select(Campus.campus_name, Campus.campus_location, Campus.campus_code)
+    ).all():
+        names["campus"].update({_plain(name), _plain(location), _plain(code)})
+    for (address,) in session.execute(select(CampusSourceAddress.source_address)).all():
+        names["campus"].add(_plain(address))
+    for code, title in session.execute(
+        select(Qualification.qualification_code, Qualification.qualification_title)
+    ).all():
+        names["qualification"].update({_plain(code), _plain(title)})
+    for values in names.values():
+        values.discard("")
+    return names
+
+
+def _unverified_fields(student: Student, names: dict[str, set[str]] | None) -> list[str]:
+    """Which of an unverified student's values match no approved record.
+
+    When all three match but no offering holds them together, the qualification
+    is the one reported - it is what is not offered there.
+    """
+    if student.course_offering_id is not None or names is None:
+        return []
+    fields = [
+        field
+        for field, value in (
+            ("college", student.college_text),
+            ("campus", student.campus_text),
+            ("qualification", student.qualification_text),
+        )
+        if _plain(value) not in names[field]
+    ]
+    return fields or ["qualification"]
+
+
+def _to_read_dict(row, names: dict[str, set[str]] | None = None) -> dict:
     student: Student = row[0]
     return {
         "id": student.id,
@@ -183,11 +229,15 @@ def _to_read_dict(row) -> dict:
         "remarks": student.remarks,
         "course_offering_id": student.course_offering_id,
         "student_group_id": student.student_group_id,
-        "college": row[1],
-        "campus": row[2],
+        # An unverified student has no offering to read these through, so what
+        # its file said is shown instead.
+        "college": row[1] or student.college_text or "",
+        "campus": row[2] or student.campus_text or "",
         "state": row[3],
-        "qualification_code": row[4],
-        "qualification_title": row[5],
+        "qualification_code": row[4] or student.qualification_text or "",
+        "qualification_title": row[5] or "",
+        "is_unverified": student.course_offering_id is None,
+        "unverified_fields": _unverified_fields(student, names),
         "intake_label": row[6],
         "group_code": row[7],
         "course_duration_option_weeks": row[8],
@@ -210,6 +260,7 @@ def list_students(
     status: str | None = None,
     coe_status: str | None = None,
     include_deleted: bool = False,
+    unverified: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -229,6 +280,9 @@ def list_students(
         query = query.where(Student.status == status.upper())
     if coe_status:
         query = query.where(Student.coe_status == coe_status.upper())
+    if unverified:
+        # Students with unverified data (approved 15 September 2026).
+        query = query.where(Student.course_offering_id.is_(None))
     if search:
         pattern = f"%{search.strip()}%"
         query = query.where(
@@ -247,14 +301,17 @@ def list_students(
     rows = session.execute(
         query.order_by(Student.id.desc()).limit(min(limit, 500)).offset(max(offset, 0))
     ).all()
-    return [_to_read_dict(row) for row in rows], total
+    # The approved names are read only when this page holds an unverified student.
+    names = _reference_names(session) if any(row[0].course_offering_id is None for row in rows) else None
+    return [_to_read_dict(row, names) for row in rows], total
 
 
 def get_student(session: Session, student_pk: int) -> dict:
     row = session.execute(_base_read_query().where(Student.id == student_pk)).one_or_none()
     if row is None:
         raise StudentServiceError(404, "That student record was not found.")
-    return _to_read_dict(row)
+    names = _reference_names(session) if row[0].course_offering_id is None else None
+    return _to_read_dict(row, names)
 
 
 # ---------------------------------------------------------------------------

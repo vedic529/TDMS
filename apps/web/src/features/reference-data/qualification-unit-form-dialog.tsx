@@ -48,7 +48,13 @@ interface QualificationUnitFormDialogProps {
   existingRecords: QualificationUnitSequence[];
   onSaved: () => void;
   /** From a suggestion: the unit code seen, and the qualification it was under. */
-  prefill?: { unitCode?: string; qualificationCode?: string } | null;
+  prefill?: {
+    unitCode?: string;
+    qualificationCode?: string;
+    /** The title an allocation file gave the unit, used when TDMS has none. */
+    unitTitle?: string;
+    uocType?: UocType;
+  } | null;
   /** The unit, so a suggestion can be resolved onto it. */
   onCreated?: (unitId: number) => void;
 }
@@ -149,7 +155,8 @@ export function QualificationUnitFormDialog({
       setInput({
         ...EMPTY,
         unitCode: code,
-        unitTitle: known?.unit_title ?? '',
+        unitTitle: known?.unit_title ?? prefill?.unitTitle ?? '',
+        uocType: prefill?.uocType ?? EMPTY.uocType,
         qualificationCode: preset ? qualificationCodeLabel(preset.qualification_code) : '',
         qualificationTitle: preset?.qualification_title ?? '',
       });

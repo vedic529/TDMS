@@ -12,8 +12,17 @@ export type ActivityAction =
   | 'Import'
   | 'Export'
   | 'Timetable save'
+  | 'Timetable generation'
+  | 'Cancellation after update'
   | 'Override'
-  | 'Access denied';
+  | 'Access denied'
+  | 'Access request submitted'
+  | 'Access request approved'
+  | 'Access request denied'
+  | 'Access request cancelled'
+  | 'Role changed'
+  | 'Account status changed'
+  | 'User provisioned';
 
 /** SRS 4.5 - Result values. */
 export type ActivityResult =

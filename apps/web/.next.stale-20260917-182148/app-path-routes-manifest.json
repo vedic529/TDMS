@@ -1,0 +1,10 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/page": "/",
+  "/login/page": "/login",
+  "/(app)/timetable/page": "/timetable",
+  "/(app)/reference-data/page": "/reference-data",
+  "/(app)/administration/page": "/administration",
+  "/(app)/trainers/page": "/trainers",
+  "/(app)/students/page": "/students"
+}

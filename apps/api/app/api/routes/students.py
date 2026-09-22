@@ -12,10 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, require_maintain_student_data, require_viewer_or_above
+from app.api.deps import (
+    get_db,
+    require_maintain_student_data,
+    require_super_admin,
+    require_viewer_or_above,
+)
 from app.models.reason import ReasonCode
 from app.models.user import User
 from app.schemas.student import (
+    ClearStudentsRead,
     ImportApplyRead,
     ImportReviewRead,
     RowsPatch,
@@ -27,6 +33,7 @@ from app.schemas.student import (
     StudentUpdate,
 )
 from app.services import student_import as import_service
+from app.services import student_maintenance as maintenance_service
 from app.services import student_timetable as timetable_service
 from app.services import students as service
 
@@ -83,6 +90,7 @@ def list_students(
     qualification_id: int | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
     coe_status: str | None = Query(default=None),
+    unverified: bool = Query(default=False, description="Only students with unverified data."),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     _: User = Depends(require_viewer_or_above),
@@ -96,6 +104,7 @@ def list_students(
         qualification_id=qualification_id,
         status=status_filter,
         coe_status=coe_status,
+        unverified=unverified,
         limit=limit,
         offset=offset,
     )
@@ -191,6 +200,51 @@ def abandon_import(
 # ===========================================================================
 # Show Timetable — declared before /{id} so the literal path wins
 # ===========================================================================
+
+
+# ===========================================================================
+# Clear the student records - Super Admin only
+#
+# Declared before `/{student_id}`: a literal segment must be matched before the
+# parameterised route, or "records" is read as a student id.
+# ===========================================================================
+
+
+@router.get(
+    "/records/clear-preview",
+    response_model=ClearStudentsRead,
+    responses={403: {"description": "Clearing the student records requires Super Admin access."}},
+)
+def preview_clear_student_records(
+    _: User = Depends(require_super_admin),
+    session: Session = Depends(get_db),
+):
+    """What a clear would remove, counted before anything is deleted."""
+    return ClearStudentsRead.model_validate(maintenance_service.clear_preview(session))
+
+
+@router.delete(
+    "/records",
+    response_model=ClearStudentsRead,
+    responses={403: {"description": "Clearing the student records requires Super Admin access."}},
+)
+def clear_student_records(
+    actor: User = Depends(require_super_admin),
+    session: Session = Depends(get_db),
+):
+    """Delete every student record, its intake, and the student import's copies.
+
+    Irreversible, and deliberately outside DATA-04's recovery period: this is the
+    bulk reset, and the per-student Delete button remains the recoverable route.
+    The rolling timetable, trainer data and allocation records are untouched.
+    """
+    try:
+        removed = maintenance_service.clear_student_records(session, actor)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return ClearStudentsRead.model_validate(removed)
 
 
 @router.get("/{student_id}/timetable", response_model=StudentTimetableRead, responses=READ_RESPONSES)

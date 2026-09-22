@@ -24,10 +24,7 @@ from app.models.allocation import (
 from app.models.timetable import RollingTimetableWeek
 from app.models.user import User
 from app.services.allocation_maintenance import clear_allocation_records, clear_preview
-from app.services.reference_suggestions import (
-    raise_reference_suggestion,
-    record_reference_exception,
-)
+from app.services.reference_suggestions import raise_reference_suggestion
 
 from tests.test_allocation_records import (  # reuse the approved fixtures
     EDITOR,
@@ -97,16 +94,7 @@ def loaded(session, refs):
         user=_editor(session),
     )
 
-    # An accepted exception from the allocation import, and entries from the two
-    # other sources that must survive.
-    record_reference_exception(
-        session,
-        entity_type="TRAINER",
-        raw_value="Allocation Exception",
-        context={},
-        source="ALLOCATION_IMPORT",
-        user_id=_editor(session).id,
-    )
+    # Entries from the two other sources, which must survive.
     raise_reference_suggestion(
         session, entity_type="COLLEGE", raw_value="Student Side", context={}, source="STUDENT_IMPORT"
     )
@@ -138,7 +126,8 @@ def test_preview_counts_before_anything_is_deleted(session, loaded):
     assert preview["deliveries"] > 0
     assert preview["sessions"] > 0
     assert preview["suggestions"] >= 1
-    assert preview["exceptions"] >= 1
+    # Recorded exceptions went on 15 September 2026; the count stays, at zero.
+    assert preview["exceptions"] == 0
     # Counting must not delete.
     assert _count(session, AllocationDelivery) == preview["deliveries"]
 

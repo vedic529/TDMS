@@ -17,8 +17,8 @@ import { env } from '@/lib/env';
  * is no email or password field, no "forgot password", and no social sign-in.
  * The application never asks the user for a Microsoft password (AUTH-03).
  *
- * Until the Microsoft Entra tenant is approved (OD-01), the same button uses
- * the development authentication adapter and the screen says so.
+ * Microsoft Entra ID verifies the organisation account before the API decides
+ * the user's TDMS access.
  */
 export function LoginScreen() {
   const router = useRouter();
@@ -113,13 +113,6 @@ export function LoginScreen() {
           </p>
         </div>
 
-        {env.authMode === 'mock' && env.canSignIn && (
-          <p className="mx-auto mt-5 max-w-[24rem] text-center text-[12px] leading-relaxed text-muted-foreground">
-            The Microsoft Entra ID application registration has not been supplied for this
-            environment, so the button above uses the development authentication adapter and creates
-            a demo session. No Microsoft account is contacted. This adapter is refused in production.
-          </p>
-        )}
       </div>
 
       <footer className="mt-10 text-center text-[12px] text-muted-foreground">

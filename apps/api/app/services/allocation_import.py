@@ -29,6 +29,7 @@ from app.models.trainer import Trainer
 from app.models.user import User
 from app.services.activity import record_activity
 from app.services.allocation_profiles import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, profile_for
+from app.services.reference_suggestions import merge_attributes
 from app.services import allocation_rules as rules
 
 KIND_MISSING_HEADER = "missing_or_unknown_header"
@@ -49,6 +50,20 @@ KIND_NO_INTAKE = "no_rolling_intake"
 KIND_TEACHING_DAYS = "not_two_teaching_days"
 KIND_CLASS_LENGTH = "not_eight_hours"
 KIND_CAPACITY = "capacity_mismatch"
+#: Not a fault in the file: the reviewer took this row out of the import.
+KIND_ROW_EXCLUDED = "row_excluded"
+#: A class time that reads cleanly but ends before it starts: a rule, not an
+#: unreadable value (15 September 2026).
+KIND_TIME_ORDER = "class_ends_before_it_starts"
+#: A classroom or trainer line with no day in front of it: nothing to read.
+KIND_BAD_DAY_VALUE = "unreadable_day_prefixed_value"
+
+#: The days-and-times column behind each stream, where a weekday rule is edited.
+_TIMES_COLUMNS = {
+    "THEORY": "Theory Class Days and Times",
+    "PRACTICAL": "Practical Class Days and Times",
+    "MSCRIS": "MSCRIS Days and Times",
+}
 
 TIME_LINE_RE = re.compile(
     r"^(?P<day>[A-Za-z]+)\s*-\s*(?P<sh>\d{1,2})(?::(?P<sm>\d{2}))?\s*(?P<sp>am|pm)\s+to\s+"
@@ -78,13 +93,28 @@ def issue_id(item: Discrepancy) -> str:
     return "|".join([item.kind, str(item.row_number or ""), item.column or "", item.value or ""])
 
 
+def _row_numbers(values: object) -> set[int]:
+    rows: set[int] = set()
+    for value in values if isinstance(values, (list, tuple, set)) else []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 2:
+            rows.add(number)
+    return rows
+
+
 @dataclass
 class ImportOverrides:
     corrections: list[dict]
+    #: Broken rules accepted for this import only (15 September 2026).
     except_ids: set[str]
     raise_ids: set[str]
     no_raise_ids: set[str]
     raise_all_unresolved: bool = True
+    #: Source rows the reviewer took out of the import.
+    exclude_rows: set[int] = field(default_factory=set)
 
     @classmethod
     def from_payload(cls, payload: object, raise_all_unresolved: bool = True) -> "ImportOverrides":
@@ -95,6 +125,7 @@ class ImportOverrides:
             raise_ids=set(data.get("raise_ids") or []),
             no_raise_ids=set(data.get("no_raise_ids") or []),
             raise_all_unresolved=raise_all_unresolved,
+            exclude_rows=_row_numbers(data.get("exclude_rows")),
         )
 
     def excepted_headers(self) -> set[str]:
@@ -107,14 +138,16 @@ class ImportOverrides:
 
     def should_raise(self, item: Discrepancy) -> bool:
         key = issue_id(item)
-        if key in self.except_ids or key in self.no_raise_ids:
+        if key in self.no_raise_ids:
             return False
         if key in self.raise_ids:
             return True
         return self.raise_all_unresolved
 
     def is_excepted(self, item: Discrepancy) -> bool:
-        return issue_id(item) in self.except_ids
+        # Only a broken rule can be accepted. An id for anything else is ignored,
+        # so an unmatched value can never be waved through as an exception.
+        return issue_category(item) == "EXCEPTION" and issue_id(item) in self.except_ids
 
 
 @dataclass
@@ -180,6 +213,8 @@ class ImportReview:
     can_apply: bool
     raise_suggestions: bool = True
     existing_deliveries: int = 0
+    exceptions_accepted: int = 0
+    rows_excluded: int = 0
 
 
 def _clean(value: object) -> str:
@@ -218,19 +253,77 @@ def _unresolved_severity(raise_suggestions: bool) -> str:
     return "warn" if raise_suggestions else "refuse"
 
 
-ROW_SKIP_KINDS = {
-    KIND_REQUIRED_EMPTY,
-    KIND_BAD_DATE,
-    KIND_BAD_TIME,
-    KIND_WEEKDAY,
-    KIND_BAD_ENUM,
-    KIND_PRACTICAL_VIRTUAL,
-    KIND_F2FV_PRACTICAL,
-    KIND_MODE_CONTRADICTION,
-    KIND_DAY_MISMATCH,
-    KIND_KEY_CONFLICT,
-    KIND_DATE_ORDER,
-}
+# -- What each issue offers (approved 15 September 2026) -----------------------
+#
+# The kind of issue decides what can be done about it. The reviewer never
+# chooses between a suggestion and an exception.
+#
+# * SUGGESTION - a value that matches no approved record, or a class no
+#   rolling-timetable intake accounts for. Raise it, or edit the cell. It is never
+#   accepted as an exception: an unapproved value is added or mapped where that
+#   data is maintained.
+# * EXCEPTION - any predefined rule the row breaks: MSCRIS off Saturday, a
+#   practical class in a virtual room, Mode of Delivery disagreeing with the
+#   classroom columns, an end date before the start. Accept it, exclude the row,
+#   or edit it - the same three choices for every rule. An accepted row is stored
+#   exactly as written, and the acceptance lasts for this import only.
+# * UNSTORABLE - a value that cannot be read at all: an unreadable date or time,
+#   an empty required cell, a dropdown value that does not exist, a line with no
+#   day, the same class twice with different values. There is nothing to store,
+#   so it is edited or its row excluded.
+#
+# Amended the same day. Rules the database had restated as CHECK constraints -
+# MSCRIS on Saturday, practical physical, dates and times in order - were first
+# filed as unstorable, which offered Exclude alone for a broken rule. The
+# constraints were dropped (migration e2b7c4d19f63) so every rule is handled alike.
+SUGGESTION_KINDS = frozenset({KIND_UNRESOLVED, KIND_NO_INTAKE})
+EXCEPTION_KINDS = frozenset(
+    {
+        KIND_MODE_CONTRADICTION,
+        KIND_NAME_MISMATCH,
+        KIND_TEACHING_DAYS,
+        KIND_CLASS_LENGTH,
+        KIND_F2FV_PRACTICAL,
+        KIND_MISSING_HEADER,
+        KIND_WEEKDAY,
+        KIND_PRACTICAL_VIRTUAL,
+        KIND_DAY_MISMATCH,
+        KIND_DATE_ORDER,
+        KIND_TIME_ORDER,
+    }
+)
+UNSTORABLE_KINDS = frozenset(
+    {
+        KIND_REQUIRED_EMPTY,
+        KIND_BAD_DATE,
+        KIND_BAD_TIME,
+        KIND_BAD_ENUM,
+        KIND_KEY_CONFLICT,
+        KIND_BAD_DAY_VALUE,
+    }
+)
+
+
+def issue_category(item: Discrepancy) -> str:
+    """SUGGESTION, EXCEPTION, UNSTORABLE or EXCLUDED - what an issue offers."""
+    if item.kind == KIND_ROW_EXCLUDED:
+        return "EXCLUDED"
+    if item.kind == KIND_MISSING_HEADER and not item.column:
+        # A required column is missing: nothing in the review can supply it.
+        return "UNSTORABLE"
+    if item.kind in SUGGESTION_KINDS:
+        return "SUGGESTION"
+    if item.kind in EXCEPTION_KINDS:
+        return "EXCEPTION"
+    return "UNSTORABLE"
+
+
+def _settle_exceptions(items: list[Discrepancy], overrides: ImportOverrides) -> None:
+    """Mark the broken rules the reviewer accepted, so their rows are stored."""
+    for item in items:
+        if item.severity == "refuse" and overrides.is_excepted(item):
+            item.severity = "warn"
+            item.message = f"{item.message} Accepted as an exception for this import."
 
 
 def _emit_unresolved(
@@ -244,19 +337,19 @@ def _emit_unresolved(
     value: str,
     message: str,
     context: dict,
+    attributes: dict | None = None,
 ) -> None:
     item = Discrepancy(KIND_UNRESOLVED, "refuse", row_number, column, value, message)
-    if overrides.is_excepted(item):
+    if overrides.should_raise(item):
         item.severity = "warn"
-        item.message = f"{message} Accepted as an exception — stored without an approved match."
+        item.message = (
+            f"{message} Raised as a suggestion - stored as written until it is added or mapped."
+        )
         # Collected here, written at apply time: an abandoned review must leave
         # nothing behind (section 2.9.1).
-        _raise_or_count_suggestion(suggestions, entity_type, value, context, kind="EXCEPT")
-    elif overrides.should_raise(item):
-        item.severity = "warn"
-        _raise_or_count_suggestion(suggestions, entity_type, value, context)
+        _raise_or_count_suggestion(suggestions, entity_type, value, context, attributes)
     else:
-        item.message = f"{message} Edit the value, raise a suggestion, or accept it as an exception."
+        item.message = f"{message} Raise a suggestion, or edit the value."
     if any(issue_id(existing) == issue_id(item) for existing in issues):
         return
     issues.append(item)
@@ -314,6 +407,9 @@ def _hour(hour: int, minute: int, meridian: str) -> dt.time:
 def parse_days_and_times(text: str, row_number: int, column: str, issues: list[Discrepancy]) -> list[tuple[str, dt.time, dt.time]]:
     if _is_null(text):
         return []
+    # Every issue offers the whole cell for editing: correcting one line of a
+    # multi-day cell must not lose the others.
+    whole = _edit_fields({column: text}, column)
     parsed: list[tuple[str, dt.time, dt.time]] = []
     for raw_line in re.split(r"[\r\n]+", text):
         line = raw_line.strip()
@@ -329,20 +425,41 @@ def parse_days_and_times(text: str, row_number: int, column: str, issues: list[D
                     column,
                     line,
                     f"{column} could not be read: {line}",
+                    edit_fields=whole,
                 )
             )
             continue
         day = rules.WEEKDAY_NAMES.get(match.group("day").upper())
         if not day:
+            # Not a day a class can be stored on at all - unreadable, not a rule.
             issues.append(
-                Discrepancy(KIND_WEEKDAY, "refuse", row_number, column, line, f"{line} is not an allowed weekday.")
+                Discrepancy(
+                    KIND_BAD_TIME,
+                    "refuse",
+                    row_number,
+                    column,
+                    line,
+                    f"{line} does not name a weekday a class can be held on.",
+                    edit_fields=whole,
+                )
             )
             continue
         start = _hour(int(match.group("sh")), int(match.group("sm") or 0), match.group("sp"))
         end = _hour(int(match.group("eh")), int(match.group("em") or 0), match.group("ep"))
         if end <= start:
-            issues.append(Discrepancy(KIND_BAD_TIME, "refuse", row_number, column, line, f"{line} ends before it starts."))
-            continue
+            # The times read cleanly, so this is a broken rule: the class is kept,
+            # and the row is stored only if the rule is accepted.
+            issues.append(
+                Discrepancy(
+                    KIND_TIME_ORDER,
+                    "refuse",
+                    row_number,
+                    column,
+                    line,
+                    f"{line} ends before it starts.",
+                    edit_fields=whole,
+                )
+            )
         parsed.append((day, start, end))
     return parsed
 
@@ -350,6 +467,7 @@ def parse_days_and_times(text: str, row_number: int, column: str, issues: list[D
 def parse_named_or_shared(text: str, days: list[str], row_number: int, column: str, issues: list[Discrepancy]) -> dict[str, str]:
     if _is_null(text):
         return {}
+    whole = _edit_fields({column: text}, column)
     lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
     if len(lines) == 1 and not NAMED_VALUE_RE.match(lines[0]):
         return {day: lines[0] for day in days}
@@ -358,11 +476,20 @@ def parse_named_or_shared(text: str, days: list[str], row_number: int, column: s
         match = NAMED_VALUE_RE.match(line)
         if not match:
             issues.append(
-                Discrepancy(KIND_DAY_MISMATCH, "refuse", row_number, column, line, f"{column} is not a day-prefixed value: {line}")
+                Discrepancy(
+                    KIND_BAD_DAY_VALUE,
+                    "refuse",
+                    row_number,
+                    column,
+                    line,
+                    f"{column} is not a day-prefixed value: {line}",
+                    edit_fields=whole,
+                )
             )
             continue
         day = rules.WEEKDAY_NAMES.get(match.group("day").upper())
         if day not in days:
+            # A rule: accepted, the line is set aside and the rest of the cell is used.
             issues.append(
                 Discrepancy(
                     KIND_DAY_MISMATCH,
@@ -371,6 +498,7 @@ def parse_named_or_shared(text: str, days: list[str], row_number: int, column: s
                     column,
                     line,
                     f"{column} names {match.group('day')} which has no matching class day.",
+                    edit_fields=whole,
                 )
             )
             continue
@@ -439,7 +567,22 @@ def _map_headers(
         name = " ".join(header.split())
         if not name:
             continue
-        if _is_ignored_extra_header(name) or name in ignored:
+        if _is_ignored_extra_header(name):
+            continue
+        if name in ignored:
+            # Accepted for this import. Listed rather than dropped, so the review
+            # still shows it and can offer Undo.
+            issues.append(
+                Discrepancy(
+                    KIND_MISSING_HEADER,
+                    "warn",
+                    1,
+                    name,
+                    name,
+                    f"Column '{name}' is not in the allocation schema. Ignored for this import "
+                    "as an accepted exception.",
+                )
+            )
             continue
         if name not in known:
             unknown.append(name)
@@ -528,17 +671,21 @@ def _resolve_facility(lookups: dict, college_id: int | None, campus_id: int | No
 
 
 def _raise_or_count_suggestion(
-    suggestions: dict[tuple, dict], entity_type: str, raw: str, context: dict, kind: str = "RAISE"
+    suggestions: dict[tuple, dict],
+    entity_type: str,
+    raw: str,
+    context: dict,
+    attributes: dict | None = None,
 ) -> None:
     """Count an unmatched value once per distinct (entity, value, context).
 
-    `kind` separates a raised suggestion from an accepted exception. Both are
-    collected here and written at apply time, so the two share one deduplication
-    key and a value can never be pending and excepted at the same time.
+    `attributes` - the row's other values, for pre-filling the form Add opens -
+    accumulate across the rows that share the entry. They never split it.
     """
-    key = (entity_type, normalise_suggestion_value(raw), _context_key(context), kind)
+    key = (entity_type, normalise_suggestion_value(raw), _context_key(context))
     if key in suggestions:
         suggestions[key]["occurrence_count"] += 1
+        suggestions[key]["attributes"] = merge_attributes(suggestions[key]["attributes"], attributes)
     else:
         suggestions[key] = {
             "entity_type": entity_type,
@@ -547,7 +694,7 @@ def _raise_or_count_suggestion(
             "context": context,
             "context_key": key[2],
             "occurrence_count": 1,
-            "kind": kind,
+            "attributes": merge_attributes({}, attributes),
         }
 
 
@@ -562,7 +709,10 @@ def _entity_contexts(values: dict[str, str]) -> dict[str, dict]:
     * a qualification code is nationally unique;
     * a unit by its qualification;
     * a room name by its campus;
-    * a trainer by its college, preserving the existing scoping.
+    * a trainer by nothing (15 September 2026). Trainers are not held per
+      college, and Map repairs every class carrying the name whichever college
+      it is at - so keying by college only split one name into an entry per
+      college, each resolving the same rows.
 
     Keying on the whole row instead — which is what this replaced — made one
     campus misspelling across fifty units into fifty separate queue entries.
@@ -573,8 +723,107 @@ def _entity_contexts(values: dict[str, str]) -> dict[str, dict]:
         "QUALIFICATION": {},
         "UNIT": {"qualification": values["Qualification Id"]},
         "FACILITY": {"campus": values["Campus Location"]},
-        "TRAINER": {"college": values["College"]},
+        "TRAINER": {},
     }
+
+
+def _entity_attributes(values: dict[str, str]) -> dict[str, dict]:
+    """What each kind of Add form can be pre-filled with from this row.
+
+    Only what the row states (approved 15 September 2026). A value the file does
+    not hold - a room's seat count, a campus's full address - is left for the
+    person to enter, never derived.
+    """
+
+    def present(name: str) -> str:
+        value = values.get(name, "")
+        return "" if _is_null(value) else value
+
+    college = present("College")
+    campus = present("Campus Location")
+    qualification = present("Qualification Id").upper()
+    qualification_title = present("Qualification Name")
+    unit = present("Units of Competency ID").upper()
+    unit_title = present("Units of Competency Title")
+    uoc_type = rules.UOC_TYPE_VALUES.get(present("UoC Type").upper(), "")
+    duration = present("Duration in Weeks")
+    group = present("Group")
+
+    location = {key: value for key, value in (("college", college), ("campus", campus), ("duration_weeks", duration)) if value}
+    placed = {key: value for key, value in (("college", college), ("campus", campus), ("group", group)) if value}
+    return {
+        "COLLEGE": {"campuses": [campus] if campus else []},
+        "CAMPUS": {"qualifications": [qualification] if qualification else []},
+        "QUALIFICATION": {"title": qualification_title, "locations": [location] if location else []},
+        "UNIT": {
+            "unit_title": unit_title,
+            "uoc_type": uoc_type,
+            "qualification_title": qualification_title,
+        },
+        "FACILITY": {"colleges": [college] if college else []},
+        "TRAINER": {
+            "colleges": [college] if college else [],
+            "campuses": [campus] if campus else [],
+            "units": [{"qualification": qualification, "unit": unit}] if qualification and unit else [],
+        },
+        "ROLLING": {
+            "unit_title": unit_title,
+            "qualification_title": qualification_title,
+            "classes": [placed] if placed else [],
+        },
+    }
+
+
+def _emit_no_intake(
+    issues: list[Discrepancy],
+    suggestions: dict,
+    overrides: ImportOverrides,
+    delivery: PlannedDelivery,
+    values: dict[str, str],
+    attributes: dict,
+) -> None:
+    """A class no rolling-timetable intake accounts for: a ROLLING suggestion.
+
+    Keyed by the class itself - unit, qualification, duration and dates - so an
+    entry is one class to place, and resolving it attaches exactly those
+    deliveries to an intake (approved 15 September 2026).
+    """
+    item = Discrepancy(
+        KIND_NO_INTAKE,
+        "refuse",
+        delivery.source_row,
+        "Units of Competency ID",
+        delivery.unit_code,
+        "No rolling-timetable intake runs this unit on these dates.",
+        edit_fields=_edit_fields(
+            values,
+            "Units of Competency ID",
+            "Unit of Competency Start Date",
+            "Unit of Competency End Date",
+            "Duration in Weeks",
+        ),
+    )
+    if overrides.should_raise(item):
+        item.severity = "warn"
+        item.message = (
+            f"{item.message} Raised to the Rolling Timetable tab - stored without an intake "
+            "until it is placed."
+        )
+        _raise_or_count_suggestion(
+            suggestions,
+            "ROLLING",
+            delivery.unit_code,
+            {
+                "qualification": delivery.qualification_code,
+                "duration_weeks": str(delivery.duration_weeks),
+                "start_date": delivery.start_date.isoformat(),
+                "end_date": delivery.end_date.isoformat(),
+            },
+            attributes,
+        )
+    else:
+        item.message = f"{item.message} Raise it to the Rolling Timetable tab, or edit the row."
+    issues.append(item)
 
 
 def _match_intakes(session: Session, planned: PlannedDelivery) -> None:
@@ -617,14 +866,27 @@ def _build_sessions(
     suggestions: dict,
     context: dict,
     overrides: ImportOverrides,
+    attributes: dict,
+    values: dict[str, str],
 ) -> list[PlannedSession]:
     sessions: list[PlannedSession] = []
+    times_column = _TIMES_COLUMNS[stream]
     for day, start, end in times:
+        # A broken rule does not drop the class (15 September 2026). The row is
+        # refused unless the rule is accepted, and an accepted row is stored as
+        # written - on the day, and in the room, the file gave.
         if day not in rules.allowed_weekdays(stream):
             issues.append(
-                Discrepancy(KIND_WEEKDAY, "refuse", row_number, classroom_column, day, f"{stream} cannot run on {day}.")
+                Discrepancy(
+                    KIND_WEEKDAY,
+                    "refuse",
+                    row_number,
+                    times_column,
+                    day,
+                    f"{stream} cannot run on {day}.",
+                    edit_fields=_edit_fields(values, times_column),
+                )
             )
-            continue
         room = classrooms.get(day, "")
         trainer = trainers.get(day, "")
         virtual_kind = rules.virtual_kind_for(room) if room else None
@@ -636,12 +898,12 @@ def _build_sessions(
                     row_number,
                     classroom_column,
                     room,
-                    f"A virtual value in {classroom_column} is refused — practical is never virtual.",
+                    f"{room} in {classroom_column} is virtual, and practical is never virtual.",
+                    edit_fields=_edit_fields(values, classroom_column),
                 )
             )
-            continue
         facility_id = None
-        classroom_text = room or None
+        classroom_text = rules.canonical_classroom(room) if room else None
         if virtual_kind:
             mode = "VIRTUAL"
         elif room:
@@ -660,6 +922,7 @@ def _build_sessions(
                     value=room,
                     message=f"{room} is not an approved facility.",
                     context=context["FACILITY"],
+                    attributes={**attributes["FACILITY"], "streams": [stream]},
                 )
         else:
             mode = "VIRTUAL" if stream == "MSCRIS" else "PHYSICAL"
@@ -678,14 +941,17 @@ def _build_sessions(
                     value=trainer,
                     message=f"{trainer} is not an approved trainer.",
                     context=context["TRAINER"],
+                    attributes={**attributes["TRAINER"], "streams": [stream]},
                 )
             if stream == "MSCRIS":
                 trainer_id = None
         if stream == "MSCRIS":
             mode = "VIRTUAL"
             facility_id = None
-            virtual_kind = virtual_kind or "FACE_TO_FACE_VIRTUAL"
-            day = rules.MSCRIS_WEEKDAY
+            virtual_kind = "FACE_TO_FACE_VC"
+            classroom_text = rules.CANONICAL_VIRTUAL_CLASSROOM
+            # The day is not forced to Saturday: a day other than Saturday was
+            # flagged above, and one a person accepted is stored as the file gave it.
         sessions.append(
             PlannedSession(
                 stream=stream,
@@ -705,7 +971,7 @@ def _build_sessions(
             issues.append(
                 Discrepancy(
                     KIND_CLASS_LENGTH,
-                    "warn",
+                    "refuse",
                     row_number,
                     classroom_column,
                     f"{start}-{end}",
@@ -754,13 +1020,31 @@ def validate_bytes(
         # Blank or NA mode means this is not an allocation row (notes, spacers, unused units).
         if _is_null(values["Mode of Delivery"]):
             continue
+        if offset in overrides.exclude_rows:
+            # Taken out by the reviewer. Listed so the review can offer Undo, and
+            # never validated: nothing from the row is written or raised.
+            issues.append(
+                Discrepancy(KIND_ROW_EXCLUDED, "warn", offset, None, None, "Excluded from this import.")
+            )
+            continue
+        row_issues_start = len(issues)
         empty_required = [name for name in profile.required if _is_null(values[name])]
         for name in empty_required:
             issues.append(Discrepancy(KIND_REQUIRED_EMPTY, "refuse", offset, name, "", f"{name} is required."))
         start = parse_date(_cell(raw, columns, "Unit of Competency Start Date"), offset, "Unit of Competency Start Date", issues)
         end = parse_date(_cell(raw, columns, "Unit of Competency End Date"), offset, "Unit of Competency End Date", issues)
         if start and end and end < start:
-            issues.append(Discrepancy(KIND_DATE_ORDER, "refuse", offset, "Unit of Competency End Date", values["Unit of Competency End Date"], "End date is before start date."))
+            issues.append(
+                Discrepancy(
+                    KIND_DATE_ORDER,
+                    "refuse",
+                    offset,
+                    "Unit of Competency End Date",
+                    values["Unit of Competency End Date"],
+                    "End date is before start date.",
+                    edit_fields=_edit_fields(values, "Unit of Competency Start Date", "Unit of Competency End Date"),
+                )
+            )
         uoc_type = rules.UOC_TYPE_VALUES.get(values["UoC Type"].upper())
         if values["UoC Type"] and not uoc_type:
             issues.append(Discrepancy(KIND_BAD_ENUM, "refuse", offset, "UoC Type", values["UoC Type"], "UoC Type is not an approved value."))
@@ -786,23 +1070,27 @@ def validate_bytes(
         # *scopes* the entity, not the whole row: keying a campus by its unit
         # turned one misspelling across fifty rows into fifty queue entries.
         context = _entity_contexts(values)
+        attributes = _entity_attributes(values)
         if values["College"] and college_id is None:
             _emit_unresolved(
                 issues, suggestions, overrides,
                 entity_type="COLLEGE", row_number=offset, column="College", value=values["College"],
                 message="College is not an approved record.", context=context["COLLEGE"],
+                attributes=attributes["COLLEGE"],
             )
         if values["Campus Location"] and campus_id is None:
             _emit_unresolved(
                 issues, suggestions, overrides,
                 entity_type="CAMPUS", row_number=offset, column="Campus Location", value=values["Campus Location"],
                 message="Campus is not an approved record.", context=context["CAMPUS"],
+                attributes=attributes["CAMPUS"],
             )
         if values["Qualification Id"] and qual is None:
             _emit_unresolved(
                 issues, suggestions, overrides,
                 entity_type="QUALIFICATION", row_number=offset, column="Qualification Id", value=values["Qualification Id"],
                 message="Qualification is not an approved record.", context=context["QUALIFICATION"],
+                attributes=attributes["QUALIFICATION"],
             )
         elif qual and values["Qualification Name"] and qual.qualification_title.strip().upper() != values["Qualification Name"].upper():
             issues.append(
@@ -821,6 +1109,7 @@ def validate_bytes(
                 issues, suggestions, overrides,
                 entity_type="UNIT", row_number=offset, column="Units of Competency ID", value=values["Units of Competency ID"],
                 message="Unit is not an approved record.", context=context["UNIT"],
+                attributes=attributes["UNIT"],
             )
         elif unit and values["Units of Competency Title"] and unit.unit_title.strip().upper() != values["Units of Competency Title"].upper():
             issues.append(
@@ -870,6 +1159,8 @@ def validate_bytes(
             suggestions=suggestions,
             context=context,
             overrides=overrides,
+            attributes=attributes,
+            values=values,
         )
         if profile.has_practical:
             sessions.extend(
@@ -888,6 +1179,8 @@ def validate_bytes(
                     suggestions=suggestions,
                     context=context,
                     overrides=overrides,
+                    attributes=attributes,
+                    values=values,
                 )
             )
         if mscris_times or not _is_null(values["MSCRIS Class Name"]):
@@ -909,6 +1202,8 @@ def validate_bytes(
                     suggestions=suggestions,
                     context=context,
                     overrides=overrides,
+                    attributes=attributes,
+                    values=values,
                 )
             )
 
@@ -934,7 +1229,7 @@ def validate_bytes(
                         offset,
                         "Mode of Delivery",
                         mode,
-                        "Mode of Delivery disagrees with the classroom columns. Correct the row before applying.",
+                        "Mode of Delivery disagrees with the classroom columns.",
                         edit_fields=_mode_classroom_edit_fields(profile, values),
                     )
                 )
@@ -943,7 +1238,7 @@ def validate_bytes(
             issues.append(
                 Discrepancy(
                     KIND_TEACHING_DAYS,
-                    "warn",
+                    "refuse",
                     offset,
                     "Theory Class Days and Times",
                     str(teaching_days),
@@ -951,6 +1246,7 @@ def validate_bytes(
                 )
             )
 
+        _settle_exceptions(issues[row_issues_start:], overrides)
         refused_row = any(item.severity == "refuse" and item.row_number == offset for item in issues)
         if not start or not end or not duration or not uoc_type or not mode:
             refused_row = True
@@ -978,7 +1274,10 @@ def validate_bytes(
             intake_match_status="NOT_FOUND",
             raw_values=values,
             refused=refused_row,
-            needs_correction=any(item.kind == KIND_MODE_CONTRADICTION and item.row_number == offset for item in issues),
+            needs_correction=any(
+                item.kind == KIND_MODE_CONTRADICTION and item.row_number == offset and item.severity == "refuse"
+                for item in issues
+            ),
         )
         if not refused_row:
             # Python treats None == None as true, so keying on the raw
@@ -1007,25 +1306,9 @@ def validate_bytes(
             else:
                 keys[key] = delivery
             _match_intakes(session, delivery)
-            if delivery.intake_match_status == "NOT_FOUND":
-                issues.append(Discrepancy(KIND_NO_INTAKE, "warn", offset, "Units of Competency ID", delivery.unit_code, "No rolling-timetable intake matches this delivery."))
+            if delivery.intake_match_status == "NOT_FOUND" and not delivery.refused:
+                _emit_no_intake(issues, suggestions, overrides, delivery, values, attributes["ROLLING"])
         planned.append(delivery)
-
-    skip_rows: set[int] = set()
-    for item in issues:
-        if not overrides.is_excepted(item) or item.kind == KIND_UNRESOLVED:
-            continue
-        item.severity = "warn"
-        if item.kind == KIND_MISSING_HEADER:
-            item.message = f"Column '{item.value}' ignored as an exception."
-        elif item.kind in ROW_SKIP_KINDS and item.row_number:
-            skip_rows.add(item.row_number)
-            item.message = f"{item.message} This row will be skipped."
-        elif item.kind == KIND_NAME_MISMATCH:
-            item.message = f"{item.message} Accepted as an exception."
-    for delivery in planned:
-        if delivery.source_row in skip_rows:
-            delivery.refused = True
 
     review = _review(
         package, file_name, len(rows), planned, issues, suggestions, raise_suggestions, existing_deliveries
@@ -1056,16 +1339,16 @@ def _review(
         units=sorted({item.unit_code for item in writable}),
         intakes_matched=sum(1 for item in writable if item.intake_match_status == "MATCHED"),
         intakes_not_matched=sum(1 for item in writable if item.intake_match_status == "NOT_FOUND"),
-        # Only raised entries; an accepted exception is recorded but is not a
-        # suggestion awaiting a decision.
-        suggestions_that_would_be_raised=sum(
-            1 for item in suggestions.values() if item.get("kind", "RAISE") == "RAISE"
-        ),
+        suggestions_that_would_be_raised=len(suggestions),
         discrepancies=issues,
         refused=refused,
         can_apply=not refused,
         raise_suggestions=raise_suggestions,
         existing_deliveries=existing_deliveries,
+        exceptions_accepted=sum(
+            1 for item in issues if issue_category(item) == "EXCEPTION" and item.severity == "warn"
+        ),
+        rows_excluded=sum(1 for item in issues if item.kind == KIND_ROW_EXCLUDED),
     )
 
 
@@ -1073,6 +1356,7 @@ def review_to_dict(review: ImportReview) -> dict:
     grouped: dict[str, list[dict]] = defaultdict(list)
     discrepancies = []
     for item in review.discrepancies:
+        category = issue_category(item)
         edit_fields = list(item.edit_fields)
         if not edit_fields and item.row_number and item.row_number >= 2 and item.column:
             edit_fields = [{"column": item.column, "value": item.value or ""}]
@@ -1089,10 +1373,14 @@ def review_to_dict(review: ImportReview) -> dict:
             "message": item.message,
             "issue_id": issue_id(item),
             "edit_fields": edit_fields,
-            "can_edit": bool(edit_fields),
-            "can_raise_suggestion": item.kind == KIND_UNRESOLVED,
-            "can_except": item.kind in {KIND_UNRESOLVED, KIND_NAME_MISMATCH, *ROW_SKIP_KINDS}
-            or (item.kind == KIND_MISSING_HEADER and bool(item.column)),
+            "can_edit": bool(edit_fields) and category != "EXCLUDED",
+            # What the issue offers is decided by its kind (15 September 2026).
+            "category": category,
+            "can_raise_suggestion": category == "SUGGESTION",
+            "can_except": category == "EXCEPTION",
+            # Excluding a row is open to every row-level problem that is not a
+            # suggestion: a broken rule and an unreadable value alike.
+            "can_exclude": category in {"UNSTORABLE", "EXCEPTION"} and bool(item.row_number and item.row_number >= 2),
         }
         discrepancies.append(payload)
         grouped[item.kind].append(payload)
@@ -1114,68 +1402,37 @@ def review_to_dict(review: ImportReview) -> dict:
         "can_apply": review.can_apply,
         "raise_suggestions": review.raise_suggestions,
         "existing_deliveries": review.existing_deliveries,
+        "exceptions_accepted": review.exceptions_accepted,
+        "rows_excluded": review.rows_excluded,
     }
 
 
-def _upsert_exceptions(session: Session, suggestions: dict, user: User) -> tuple[int, list[str]]:
-    """Write the accepted exceptions collected during validation (section 2.9).
-
-    Written here, at apply time, in the same transaction as the rows that depend
-    on them — a review that is abandoned leaves nothing behind. A value already
-    approved or rejected is not silently reopened; it returns a warning instead.
-    """
-    from app.services.reference_suggestions import record_reference_exception
-
-    recorded = 0
-    warnings: list[str] = []
-    for item in suggestions.values():
-        if item.get("kind") != "EXCEPT":
-            continue
-        row, warning = record_reference_exception(
-            session,
-            entity_type=item["entity_type"],
-            raw_value=item["raw_value"],
-            context=item["context"],
-            source="ALLOCATION_IMPORT",
-            user_id=user.id,
-            occurrences=item["occurrence_count"],
-        )
-        if warning:
-            warnings.append(warning)
-            continue
-        if row is not None:
-            recorded += 1
-            record_activity(
-                session,
-                user=user,
-                action="UPDATE",
-                page_or_function="Reference data - suggestion queue",
-                detail=(
-                    f"Accepted {item['entity_type']} '{item['raw_value']}' as an exception "
-                    f"on {item['occurrence_count']} record(s)."
-                ),
-                record_reference=str(row.id),
-                result="COMPLETED",
-            )
-    return recorded, warnings
-
-
 def _upsert_suggestions(session: Session, suggestions: dict, now: dt.datetime) -> int:
+    if not suggestions:
+        return 0
+    # One read for every entry, never one per entry. A file can raise an entry
+    # per class - a ROLLING entry is keyed by the class's dates - so a lookup per
+    # entry would grow with the rows. The read is a superset (every held entry of
+    # these types and values); the exact key is matched here.
+    held = {
+        (row.entity_type, row.normalised_value, row.context_key): row
+        for row in session.execute(
+            select(ReferenceSuggestion).where(
+                ReferenceSuggestion.entity_type.in_({item["entity_type"] for item in suggestions.values()}),
+                ReferenceSuggestion.normalised_value.in_(
+                    {item["normalised_value"] for item in suggestions.values()}
+                ),
+            )
+        ).scalars()
+    }
     handled = 0
     for item in suggestions.values():
-        if item.get("kind", "RAISE") != "RAISE":
-            continue  # exceptions take their own path (2.9)
         handled += 1
-        existing = session.execute(
-            select(ReferenceSuggestion).where(
-                ReferenceSuggestion.entity_type == item["entity_type"],
-                ReferenceSuggestion.normalised_value == item["normalised_value"],
-                ReferenceSuggestion.context_key == item["context_key"],
-            )
-        ).scalar_one_or_none()
+        existing = held.get((item["entity_type"], item["normalised_value"], item["context_key"]))
         if existing:
             existing.occurrence_count += item["occurrence_count"]
             existing.last_seen_at = now
+            existing.attributes = merge_attributes(existing.attributes, item.get("attributes"))
             if existing.status != "PENDING":
                 was_rejected = existing.status == "REJECTED"
                 existing.status = "PENDING"
@@ -1203,13 +1460,12 @@ def _upsert_suggestions(session: Session, suggestions: dict, now: dt.datetime) -
                     first_seen_at=now,
                     last_seen_at=now,
                     status="PENDING",
+                    attributes=item.get("attributes") or {},
                 )
             )
     session.flush()
     # The number of values now sitting in the queue — new rows plus the ones an
-    # existing entry absorbed. Entries collected as exceptions are not counted:
-    # they are recorded by `_upsert_exceptions`, and counting them here reported
-    # suggestions the queue never held.
+    # existing entry absorbed.
     return handled
 
 
@@ -1294,7 +1550,6 @@ def apply_rows(
                 _insert_delivery(session, item)
     session.flush()
     suggestion_count = _upsert_suggestions(session, suggestions, now)
-    exception_count, exception_warnings = _upsert_exceptions(session, suggestions, user)
     batch = AllocationImportBatch(
         training_package=package,
         file_name=file_name,
@@ -1334,7 +1589,9 @@ def apply_rows(
         page_or_function="Page 1 - Timetable View and Management",
         detail=(
             f"Imported {file_name} under {package} ({apply_mode}): read {review.rows_read}, "
-            f"wrote {len(writable)} deliveries and {sum(len(item.sessions) for item in writable)} sessions."
+            f"wrote {len(writable)} deliveries and {sum(len(item.sessions) for item in writable)} sessions; "
+            f"{review.exceptions_accepted} exception(s) accepted for this import, "
+            f"{review.rows_excluded} row(s) excluded."
         ),
         record_reference=f"{package}:{file_name}:{len(writable)}",
         result="COMPLETED",
@@ -1345,10 +1602,11 @@ def apply_rows(
         "sessions_written": sum(len(item.sessions) for item in writable),
         "deliveries_removed": batch.deliveries_removed,
         "suggestions_raised": suggestion_count,
-        "exceptions_recorded": exception_count,
-        # A value already approved or rejected is not reopened as an exception;
-        # the import says so rather than failing quietly (2.9.2).
-        "warnings": exception_warnings,
+        # Accepted for this import only (15 September 2026): the rows are stored
+        # as written, and nothing about the acceptance is kept for the next one.
+        "exceptions_accepted": review.exceptions_accepted,
+        "rows_excluded": review.rows_excluded,
+        "warnings": [],
         "apply_mode": apply_mode,
     }
 

@@ -9,12 +9,6 @@ import type { Campus, College } from '@/types/reference';
 /**
  * College and campus lookups for the reference-data screens, from PostgreSQL.
  *
- * The application-wide `ReferenceDataProvider` is still backed by the
- * transitional mock service that Student, Trainer and Timetable use. Reading
- * dropdown options from it here would leave this module half real — the course
- * list from the database, the college filter from a mock array — which is
- * exactly the mixing Step 6 set out to remove.
- *
  * `campusesForCollege` asks the server rather than filtering a cached list.
  * COL-01 approval lives in `college_campuses` and the API applies it in SQL;
  * deciding it in the browser would put an approval rule in the one place a user

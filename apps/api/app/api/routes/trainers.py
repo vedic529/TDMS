@@ -11,6 +11,8 @@ and `/import/...` would be captured by the parameterised route — the conventio
 
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -35,12 +37,15 @@ from app.schemas.trainer import (
     TrainerDetailRead,
     TrainerList,
     TrainerRead,
+    TrainerTimetableRead,
+    TrainerTimetableStudentList,
     TrainerUpdate,
     UnitCoverageList,
     UnitsWrite,
 )
 from app.services import trainer_import as import_service
 from app.services import trainers as service
+from app.services import trainer_timetable
 
 router = APIRouter(prefix="/trainers", tags=["trainer data"])
 
@@ -202,6 +207,9 @@ def patch_import_rows(
             excluded_row_ids=payload.excluded_row_ids,
             exclude_missing_trainers=payload.exclude_missing_trainers,
             override_decisions=payload.override_decisions,
+            accepted_exception_row_ids=payload.accepted_exception_row_ids,
+            withdrawn_exception_row_ids=payload.withdrawn_exception_row_ids,
+            included_row_ids=payload.included_row_ids,
             user=user,
         ),
     )
@@ -259,6 +267,33 @@ def abandon_import(
 # ===========================================================================
 # Records
 # ===========================================================================
+
+
+@router.get("/{trainer_id}/timetable", response_model=TrainerTimetableRead, responses=READ_RESPONSES)
+def read_trainer_timetable(
+    trainer_id: int,
+    month: dt.date = Query(description="Any date in the selected month."),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    return _read(lambda: trainer_timetable.calendar_month(session, trainer_id, month))
+
+
+@router.get(
+    "/{trainer_id}/timetable/students",
+    response_model=TrainerTimetableStudentList,
+    responses=READ_RESPONSES,
+)
+def read_trainer_timetable_students(
+    trainer_id: int,
+    class_date: dt.date = Query(),
+    session_ids: list[int] = Query(),
+    _: User = Depends(require_viewer_or_above),
+    session: Session = Depends(get_db),
+):
+    return _read(
+        lambda: trainer_timetable.attending_students(session, trainer_id, class_date, session_ids)
+    )
 
 
 @router.get("", response_model=TrainerList, responses=READ_RESPONSES)

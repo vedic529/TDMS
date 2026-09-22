@@ -10,6 +10,7 @@ from app.core import rbac
 from app.core.config import Settings, get_settings
 from app.models.user import User
 from app.schemas.access import (
+    ActivityRecordCreate,
     AccessRequestSummary,
     MeResponse,
     NotificationOutcome,
@@ -17,10 +18,32 @@ from app.schemas.access import (
     SubmitAccessRequestResponse,
     UserSummary,
 )
+from app.services.activity import record_activity
 from app.services import access_requests as service
 from app.services.notifications import AccessRequestNotification, get_notification_service
 
 router = APIRouter(prefix="/me", tags=["me"])
+
+
+@router.post("/activity-records", status_code=201)
+def create_activity_record(
+    payload: ActivityRecordCreate,
+    user: User = Depends(require_authenticated_user),
+    session: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Record a completed browser-side action, currently used for exports."""
+    if payload.action != "EXPORT":
+        raise HTTPException(status_code=422, detail="Only export activity can be recorded here.")
+    record = record_activity(
+        session,
+        user=user,
+        action=payload.action,
+        page_or_function=payload.page_or_function,
+        record_reference=payload.record_reference,
+        detail=payload.detail,
+    )
+    session.commit()
+    return {"id": f"ACT-{record.id:06d}"}
 
 
 def _user_summary(user: User) -> UserSummary:

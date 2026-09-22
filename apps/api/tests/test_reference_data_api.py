@@ -1025,3 +1025,47 @@ def test_page_4b_lists_a_membership_that_has_no_approved_order(client, people, s
     assert len(rows) == 1, "the unsequenced membership was dropped from the response"
     assert rows[0]["delivery_order"] is None
     assert rows[0]["unit_code"] == "TESTUNIT001"
+
+
+def test_the_course_panel_shows_the_address_of_this_college_at_this_campus(client, seed, session):
+    """Approved 21 September 2026.
+
+    The table lists what identifies a record; the panel answers "what else do we
+    know". The address comes from the Campus Address Dictionary entry for this
+    **college at this campus**, because one campus name is a different building
+    for each college — not from the campus's own single address.
+    """
+    offering = client.post(
+        "/reference/courses",
+        json={
+            "college_id": seed["college"]["id"],
+            "campus_id": seed["campus"]["id"],
+            "qualification_id": seed["qualification"]["id"],
+            "course_code": "TESTCRS900",
+            "course_status_id": seed["status_id"],
+            "duration_options": [26, 52],
+        },
+        headers=as_user(ADMIN),
+    ).json()
+
+    plain = client.get(f"/reference/courses/{offering['id']}/detail", headers=as_user(VIEWER)).json()
+    assert plain["address"] == "Test Location", "the campus's own address, until the dictionary holds one"
+    assert plain["address_is_from_dictionary"] is False
+    assert plain["students"] == {"total": 0, "coe": 0, "non_coe": 0}
+    assert plain["duration_options"] == [26, 52]
+
+    client.post(
+        "/reference/campus-addresses",
+        json={
+            "college_id": seed["college"]["id"],
+            "campus_id": seed["campus"]["id"],
+            "address": "Level 9, 1 Test Street, Testville VIC 3000",
+        },
+        headers=as_user(ADMIN),
+    )
+    detail = client.get(f"/reference/courses/{offering['id']}/detail", headers=as_user(VIEWER)).json()
+    assert detail["address"] == "Level 9, 1 Test Street, Testville VIC 3000"
+    assert detail["address_is_from_dictionary"] is True
+    assert detail["campus_name"] == "Test Campus"
+    assert detail["qualification_code"] == "TESTQUAL001"
+    assert "Level 9, 1 Test Street, Testville VIC 3000" in detail["campus_source_addresses"]

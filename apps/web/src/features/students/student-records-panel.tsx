@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { FilePlus2, Search, Trash2, Users } from 'lucide-react';
+import { FilePlus2, Search, ShieldAlert, Trash2, Users } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -17,6 +17,7 @@ import { useReferenceData } from '@/features/shared/reference-data-context';
 import { useCascadingFilters } from '@/features/reference-data/use-cascading-filters';
 import { MultiSelectFilter } from '@/components/common/multi-select-filter';
 import { useAuth } from '@/features/auth/auth-context';
+import { ClearStudentDataDialog } from './clear-student-data-dialog';
 import { StudentDetailPanel } from './student-detail-panel';
 import { SingleStudentEntry } from './single-student-entry';
 import { studentsApi, STUDENTS_EMPTY_DESCRIPTION, STUDENTS_EMPTY_TITLE, type StudentRecord } from '@/services/students-api';
@@ -78,6 +79,8 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
   const cascade = useCascadingFilters();
 
   const [search, setSearch] = React.useState('');
+  // Students stored with a value that matches no approved record (15 September 2026).
+  const [unverifiedOnly, setUnverifiedOnly] = React.useState(false);
   const [rows, setRows] = React.useState<StudentRecord[]>([]);
   const [total, setTotal] = React.useState(0);
   const [page, setPage] = React.useState(0);
@@ -131,6 +134,7 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
         search: search || undefined,
         college_id: cascade.filters.collegeIds.length === 1 ? Number(cascade.filters.collegeIds[0]) : undefined,
         campus_id: cascade.filters.campusIds.length === 1 ? Number(cascade.filters.campusIds[0]) : undefined,
+        unverified: unverifiedOnly || undefined,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
@@ -154,6 +158,7 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
     }
   }, [
     search,
+    unverifiedOnly,
     page,
     cascade.filters.collegeIds,
     cascade.filters.campusIds,
@@ -171,7 +176,7 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
   // result set is not page 4 of the new one.
   React.useEffect(() => {
     setPage(0);
-  }, [search, cascade.filters.collegeIds, cascade.filters.campusIds, cascade.filters.qualificationIds]);
+  }, [search, unverifiedOnly, cascade.filters.collegeIds, cascade.filters.campusIds, cascade.filters.qualificationIds]);
 
   function openDetail(student: StudentRecord) {
     setSelected(student);
@@ -219,7 +224,16 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
     {
       id: 'studentId',
       header: 'Student ID',
-      cell: (row) => <span className="font-medium text-foreground">{row.student_id}</span>,
+      cell: (row) => (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span className="font-medium text-foreground">{row.student_id}</span>
+          {row.is_unverified && (
+            <Badge variant="destructive" className="text-[10px]">
+              Unverified
+            </Badge>
+          )}
+        </span>
+      ),
       sortValue: (row) => row.student_id,
     },
     {
@@ -233,7 +247,13 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
       header: 'Qualification',
       cell: (row) => (
         <span className="block max-w-72">
-          <span className="block font-medium text-foreground">{row.qualification_code}</span>
+          <span
+            className={`block font-medium ${
+              row.unverified_fields.includes('qualification') ? 'text-destructive' : 'text-foreground'
+            }`}
+          >
+            {row.qualification_code}
+          </span>
           <span className="block truncate text-[12px] text-muted-foreground">{row.qualification_title}</span>
         </span>
       ),
@@ -258,7 +278,14 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
       ),
       sortValue: (row) => row.status,
     },
-    { id: 'campus', header: 'Campus', cell: (row) => row.campus, sortValue: (row) => row.campus },
+    {
+      id: 'campus',
+      header: 'Campus',
+      cell: (row) => (
+        <span className={row.unverified_fields.includes('campus') ? 'text-destructive' : undefined}>{row.campus}</span>
+      ),
+      sortValue: (row) => row.campus,
+    },
     {
       id: 'coe',
       header: 'CoE',
@@ -304,6 +331,15 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
             <span className="whitespace-nowrap text-[12px] text-muted-foreground tabular">
               {total} {total === 1 ? 'record' : 'records'}
             </span>
+            <Button
+              size="sm"
+              variant={unverifiedOnly ? 'default' : 'outline'}
+              aria-pressed={unverifiedOnly}
+              onClick={() => setUnverifiedOnly((value) => !value)}
+            >
+              <ShieldAlert aria-hidden="true" />
+              Students with unverified data
+            </Button>
           </div>
           <div className="flex items-center gap-2">
             {permissions.maintainStudentData && (
@@ -352,6 +388,9 @@ export function StudentRecordsPanel({ initialStudentId }: { initialStudentId?: s
                 Deleted Records
               </Button>
             )}
+            {/* Clearing every student record is a Super Admin action, not
+                ordinary student maintenance: it deletes the recycle area too. */}
+            {permissions.accessAdministration && <ClearStudentDataDialog onCleared={() => void load()} />}
           </div>
         </CardHeader>
 

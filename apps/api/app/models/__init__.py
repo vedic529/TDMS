@@ -19,7 +19,7 @@ from app.models.reason import ReasonCode, ReasonCodeContext
 from app.models.activity import UserActivityRecord
 
 # Reference data
-from app.models.college import Campus, College, CollegeCampus
+from app.models.college import Campus, City, College, CollegeCampus
 from app.models.qualification import Qualification, QualificationUnit, Unit
 from app.models.course import CourseOffering, CourseStatus, OfferingDurationOption
 from app.models.facility import Facility, FacilityCollege, FacilityFaculty
@@ -56,6 +56,7 @@ __all__ = [
     "UserActivityRecord",
     # reference data
     "College",
+    "City",
     "Campus",
     "CollegeCampus",
     "Qualification",
@@ -100,6 +101,7 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "reason_code_contexts",
     "user_activity_records",
     "colleges",
+    "cities",
     "campuses",
     "campus_source_addresses",
     "college_campuses",

@@ -14,7 +14,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { exportRows, type ExportColumn } from '@/lib/export';
-import { getTdmsClient } from '@/services';
+import { administrationApi } from '@/services/administration-api';
 import { useAuth } from '@/features/auth/auth-context';
 import type { ExportFormat } from '@/types/common';
 
@@ -56,7 +56,7 @@ export function ExportMenu<T>({
 
     const result = exportRows({ format, baseFileName, columns, rows });
 
-    await getTdmsClient().recordActivity({
+    await administrationApi.recordExport({
       userReference: user.organisationEmail,
       accessLevel: user.role,
       pageOrFunction: pageReference,

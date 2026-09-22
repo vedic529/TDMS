@@ -24,7 +24,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.college import Campus, College, CollegeCampus
+from app.models.college import Campus, CampusSourceAddress, College, CollegeCampus
 from app.models.course import CourseOffering, CourseStatus, OfferingDurationOption
 from app.models.facility import Facility, FacilityCollege, FacilityFaculty
 from app.models.qualification import Qualification, QualificationUnit, Unit
@@ -1445,3 +1445,119 @@ def create_facility(session: Session, actor: User, payload: schemas.FacilityCrea
         ),
     )
     return facility
+
+
+# ---------------------------------------------------------------------------
+# One course record, with everything the site knows about it (21 September 2026)
+# ---------------------------------------------------------------------------
+
+
+def course_offering_detail(session: Session, offering_id: int) -> dict:
+    """Everything recorded about one college/campus/qualification combination.
+
+    The table lists the six values that identify a record; this answers "what
+    else do we know", gathering what other work areas hold about it: the
+    address the Campus Address Dictionary keeps for this **college at this
+    campus**, the city, every spelling the campus is known by, the approved
+    durations, the students enrolled here, and the classes the timetable holds.
+
+    Five small queries, none of them per row.
+    """
+    from app.models.allocation import AllocationDelivery
+    from app.models.facility import Facility, FacilityCollege
+    from app.models.student import Student, StudentGroup
+
+    offering = get_course_offering(session, offering_id)
+    campus = session.get(Campus, offering.campus_id)
+    college = session.get(College, offering.college_id)
+    link = session.get(CollegeCampus, (offering.college_id, offering.campus_id))
+    qualification = session.get(Qualification, offering.qualification_id)
+
+    spellings = list(
+        session.execute(
+            select(CampusSourceAddress.source_address)
+            .where(CampusSourceAddress.campus_id == offering.campus_id)
+            .order_by(CampusSourceAddress.source_address)
+        ).scalars()
+    )
+
+    # Who is enrolled here, by intake. Active records only: a deleted student is
+    # in the recycle area and is not enrolled.
+    enrolments = session.execute(
+        select(
+            StudentGroup.rolling_intake_label,
+            Student.coe_status,
+            func.count(Student.id),
+        )
+        .outerjoin(StudentGroup, StudentGroup.id == Student.student_group_id)
+        .where(
+            Student.course_offering_id == offering_id,
+            Student.is_deleted.is_(False),
+            Student.status == "ACTIVE",
+        )
+        .group_by(StudentGroup.rolling_intake_label, Student.coe_status)
+    ).all()
+    by_intake: dict[str, dict] = {}
+    students = {"total": 0, "coe": 0, "non_coe": 0}
+    for label, coe_status, count in enrolments:
+        students["total"] += count
+        students["coe" if coe_status == "COE" else "non_coe"] += count
+        entry = by_intake.setdefault(label or "", {"intake_label": label or "", "students": 0})
+        entry["students"] += count
+
+    # What the timetable holds for this qualification at this college and campus.
+    classes = session.execute(
+        select(func.count())
+        .select_from(AllocationDelivery)
+        .where(
+            AllocationDelivery.college_id == offering.college_id,
+            AllocationDelivery.campus_id == offering.campus_id,
+            AllocationDelivery.qualification_id == offering.qualification_id,
+            AllocationDelivery.is_quarantined.is_(False),
+        )
+    ).scalar_one()
+
+    rooms = session.execute(
+        select(func.count())
+        .select_from(Facility)
+        .join(FacilityCollege, FacilityCollege.facility_id == Facility.id)
+        .where(
+            Facility.campus_id == offering.campus_id,
+            FacilityCollege.college_id == offering.college_id,
+            Facility.is_active.is_(True),
+        )
+    ).scalar_one()
+
+    return {
+        "id": offering.id,
+        "course_code": offering.course_code,
+        "college_short_name": college.college_short_name if college else "",
+        "college_full_name": college.college_full_name if college else "",
+        "campus_name": campus.campus_name if campus else "",
+        "campus_code": campus.campus_code if campus else "",
+        "state": campus.state if campus else "",
+        # The address of this college at this campus, not the campus's own: one
+        # campus name is a different building for each college.
+        "address": (link.address if link else None) or (campus.campus_location if campus else None),
+        "address_is_from_dictionary": bool(link and link.address),
+        "city": campus.city if campus else None,
+        "campus_source_addresses": spellings,
+        "qualification_code": qualification.qualification_code if qualification else None,
+        "qualification_title": qualification.qualification_title if qualification else "",
+        "course_level": qualification.course_level if qualification else None,
+        "field_of_education_broad": qualification.field_of_education_broad if qualification else None,
+        "field_of_education_narrow": qualification.field_of_education_narrow if qualification else None,
+        "course_sector": qualification.course_sector if qualification else None,
+        "source_url": qualification.source_url if qualification else None,
+        "course_status_label": offering.course_status.label,
+        "course_status_code": offering.course_status.code,
+        "total_course_cost": offering.total_course_cost,
+        "duration_options": sorted(
+            option.duration_weeks for option in offering.duration_options if option.is_active
+        ),
+        "students": students,
+        "intakes": sorted(by_intake.values(), key=lambda item: item["intake_label"]),
+        "classes": classes,
+        "rooms": rooms,
+        "is_deleted": offering.is_deleted,
+    }
